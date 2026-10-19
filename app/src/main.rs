@@ -1,3 +1,7 @@
+// Release builds run as a normal windowed app (no console window).
+// Debug builds keep the console so errors and panics stay visible.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod canvas;
 mod state;
 mod timeline;
@@ -8,9 +12,11 @@ use std::path::PathBuf;
 
 fn main() -> eframe::Result {
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("built-in icon");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("PuppetMotion 2D")
+            .with_icon(icon)
             .with_inner_size([1280.0, 800.0])
             .with_drag_and_drop(true),
         ..Default::default()

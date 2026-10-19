@@ -733,7 +733,7 @@ impl AppState {
     }
 
     pub fn side_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Animator");
+        // ui.heading("Animator");
         ui.horizontal(|ui| {
             if ui.button("Open…").on_hover_text("An image or a project (Ctrl+O)").clicked() {
                 self.open_dialog(ui.ctx());
