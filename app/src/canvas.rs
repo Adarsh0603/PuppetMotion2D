@@ -1,11 +1,13 @@
 //! Image canvas: pan/zoom view, box tools, and draggable skeleton joints.
 
-use crate::state::{AppState, Mode, box_color};
+use crate::state::{AppState, Mode, SkelSel, box_color};
+use anim_core::skeleton::dist_to_segment;
 use anim_core::{PartBox, RectI};
 use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
 const HANDLE_PX: f32 = 6.0;
 const JOINT_HIT_PX: f32 = 10.0;
+const BONE_HIT_PX: f32 = 6.0;
 const MIN_ZOOM: f32 = 0.05;
 const MAX_ZOOM: f32 = 32.0;
 
@@ -61,8 +63,13 @@ pub enum Drag {
     Move { index: usize, grab: Vec2 },
     /// `anchor` is the fixed corner opposite the dragged handle.
     Resize { index: usize, anchor: Pos2 },
-    Joint { index: usize },
+    /// Moving a joint. `new_bone` is set when the joint is the tip of a bone
+    /// created by this drag (Shift+drag), which is dropped if left too short.
+    Joint { index: usize, new_bone: bool },
 }
+
+/// A bone shorter than this (image px) after Shift+drag is discarded.
+const MIN_BONE_PX: f32 = 3.0;
 
 fn round(p: Pos2) -> (i32, i32) {
     (p.x.round() as i32, p.y.round() as i32)
@@ -89,17 +96,21 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     };
 
-    if state.fit_pending || (response.hovered() && ui.input(|i| i.key_pressed(Key::F))) {
+    // Single-key shortcuts are off while typing in a text box.
+    let typing = ui.ctx().text_edit_focused();
+    let key = |k: Key| !typing && ui.input(|i| i.key_pressed(k));
+    if state.fit_pending || (response.hovered() && key(Key::F)) {
         state.view = View::fit(canvas, image_size);
         state.fit_pending = false;
     }
-    if state.mode == Mode::Boxes {
-        if ui.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) {
-            state.delete_selected();
+    if key(Key::Delete) || key(Key::Backspace) {
+        match state.mode {
+            Mode::Boxes => state.delete_selected(),
+            Mode::Joints => state.delete_skel_selection(),
         }
-        if response.hovered() && ui.input(|i| i.key_pressed(Key::A)) {
-            state.cycle_axis();
-        }
+    }
+    if state.mode == Mode::Boxes && response.hovered() && key(Key::A) {
+        state.cycle_axis();
     }
 
     // Zoom with scroll wheel / pinch around the cursor.
@@ -145,25 +156,80 @@ fn draw_skeleton(painter: &egui::Painter, canvas: Rect, state: &AppState, hover:
             painter.circle_filled(a, r, fill);
             painter.circle_filled(b, r, fill);
         }
-        painter.line_segment([a, b], Stroke::new(4.0, Color32::from_black_alpha(160)));
-        painter.line_segment([a, b], Stroke::new(2.0, box_color(i)));
+        let selected = state.skel_sel == SkelSel::Part(i);
+        let (outline, core) = if selected { (Color32::WHITE, 4.0) } else { (Color32::from_black_alpha(160), 2.0) };
+        painter.line_segment([a, b], Stroke::new(core + 2.0, outline));
+        painter.line_segment([a, b], Stroke::new(core, box_color(i)));
+        if selected {
+            label(painter, a.lerp(b, 0.5) + vec2(8.0, 8.0), &skel.parts[i].name);
+        }
     }
     let active = match state.drag {
-        Drag::Joint { index } => Some(index),
+        Drag::Joint { index, .. } => Some(index),
         _ => hover.and_then(|h| hit_joint(state, canvas, h)),
     };
     for (i, j) in skel.joints.iter().enumerate() {
         let p = to_screen(j.pos);
         let r = if active == Some(i) { 7.0 } else { 5.0 };
-        painter.circle(p, r, Color32::WHITE, Stroke::new(1.5, Color32::BLACK));
+        let fill = if state.skel_sel == SkelSel::Joint(i) { Color32::YELLOW } else { Color32::WHITE };
+        painter.circle(p, r, fill, Stroke::new(1.5, Color32::BLACK));
     }
     if let Some(i) = active {
-        let p = to_screen(skel.joints[i].pos) + vec2(10.0, -10.0);
-        let galley =
-            painter.layout_no_wrap(skel.joints[i].name.clone(), egui::FontId::proportional(14.0), Color32::WHITE);
-        let bg = Rect::from_min_size(p, galley.size()).expand(3.0);
-        painter.rect_filled(bg, 3.0, Color32::from_black_alpha(200));
-        painter.galley(p, galley, Color32::WHITE);
+        label(painter, to_screen(skel.joints[i].pos) + vec2(10.0, -10.0), &skel.joints[i].name);
+    }
+}
+
+/// Small text tag with a dark background, top-left at `pos`.
+fn label(painter: &egui::Painter, pos: Pos2, text: &str) {
+    let galley = painter.layout_no_wrap(text.to_owned(), egui::FontId::proportional(14.0), Color32::WHITE);
+    let bg = Rect::from_min_size(pos, galley.size()).expand(3.0);
+    painter.rect_filled(bg, 3.0, Color32::from_black_alpha(200));
+    painter.galley(pos, galley, Color32::WHITE);
+}
+
+/// Bone under the screen position `p`, if any (nearest within a few points).
+fn hit_part(state: &AppState, canvas: Rect, p: Pos2) -> Option<usize> {
+    let doc = state.doc.as_ref()?;
+    let skel = &doc.skeleton;
+    let to_screen = |q: [f32; 2]| {
+        let s = state.view.image_to_screen(canvas, pos2(q[0], q[1]));
+        [s.x, s.y]
+    };
+    (0..skel.parts.len())
+        .map(|i| {
+            let (a, b) = skel.bone(i);
+            (i, dist_to_segment([p.x, p.y], to_screen(a), to_screen(b)))
+        })
+        .filter(|&(_, d)| d <= BONE_HIT_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// Start a primary-button drag in joints mode at screen position `o`.
+/// Plain drag moves a joint; Shift+drag grows a new bone from a joint or,
+/// on empty space, creates a new bone with two fresh joints.
+fn begin_joint_drag(state: &mut AppState, canvas: Rect, o: Pos2, shift: bool) -> Drag {
+    let hit = hit_joint(state, canvas, o);
+    let p = state.view.screen_to_image(canvas, o);
+    let Some(doc) = &mut state.doc else { return Drag::None };
+    let p = [p.x, p.y];
+    match (hit, shift) {
+        (Some(index), false) => {
+            state.skel_sel = SkelSel::Joint(index);
+            Drag::Joint { index, new_bone: false }
+        }
+        (Some(pivot), true) => {
+            let tip = doc.skeleton.add_joint(p);
+            state.skel_sel = SkelSel::Part(doc.skeleton.add_part(pivot, tip));
+            Drag::Joint { index: tip, new_bone: true }
+        }
+        (None, true) => {
+            let pivot = doc.skeleton.add_joint(p);
+            let tip = doc.skeleton.add_joint(p);
+            state.skel_sel = SkelSel::Part(doc.skeleton.add_part(pivot, tip));
+            Drag::Joint { index: tip, new_bone: true }
+        }
+        (None, false) => Drag::None,
     }
 }
 
@@ -236,12 +302,15 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
         let pan = response.dragged_by(PointerButton::Middle) || (space && response.dragged_by(PointerButton::Primary));
         // Hit-test where the button went down, not where the drag threshold was crossed.
         let origin = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos());
+        let shift = ui.input(|i| i.modifiers.shift);
+        // Snapshot for undo; recorded when the drag ends if anything changed.
+        state.drag_before = state.snapshot();
         state.drag = if pan {
             Drag::Pan
         } else if let (true, Some(o)) = (response.dragged_by(PointerButton::Primary), origin) {
             match state.mode {
                 Mode::Boxes => begin_drag(state, view.screen_to_image(canvas, o)),
-                Mode::Joints => hit_joint(state, canvas, o).map_or(Drag::None, |index| Drag::Joint { index }),
+                Mode::Joints => begin_joint_drag(state, canvas, o, shift),
             }
         } else {
             Drag::None
@@ -256,7 +325,7 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
                     *current = p;
                 }
             }
-            &mut Drag::Joint { index } => {
+            &mut Drag::Joint { index, .. } => {
                 if let (Some(p), Some(doc)) = (pointer_img, &mut state.doc) {
                     let (w, h) = doc.image.dimensions();
                     doc.skeleton.joints[index].pos = [p.x.clamp(0.0, w as f32), p.y.clamp(0.0, h as f32)];
@@ -270,16 +339,47 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
 
     if response.drag_stopped() {
         finish_drag(state);
+        let before = state.drag_before.take();
+        if is_stub_bone(state)
+            && let Some(before) = before
+        {
+            // A Shift+click without real movement: undo the bone silently.
+            state.restore(before);
+        } else {
+            state.commit(before);
+        }
         state.drag = Drag::None;
         state.drag_pointer = None;
     }
 
     if response.clicked()
-        && state.mode == Mode::Boxes
-        && let Some(p) = pointer_img
+        && let Some(screen) = response.interact_pointer_pos()
     {
-        state.selected = hit_box(state, p);
+        match state.mode {
+            Mode::Boxes => state.selected = hit_box(state, view.screen_to_image(canvas, screen)),
+            Mode::Joints => {
+                state.skel_sel = match (hit_joint(state, canvas, screen), hit_part(state, canvas, screen)) {
+                    (Some(j), _) => SkelSel::Joint(j),
+                    (None, Some(p)) => SkelSel::Part(p),
+                    (None, None) => SkelSel::None,
+                };
+            }
+        }
     }
+}
+
+/// Whether the drag that just ended created a bone too short to keep.
+fn is_stub_bone(state: &AppState) -> bool {
+    let (Drag::Joint { index, new_bone: true }, Some(doc)) = (state.drag, &state.doc) else {
+        return false;
+    };
+    let skel = &doc.skeleton;
+    skel.parts.iter().any(|p| {
+        p.tip == index && {
+            let (a, b) = (skel.joints[p.pivot].pos, skel.joints[p.tip].pos);
+            (a[0] - b[0]).hypot(a[1] - b[1]) < MIN_BONE_PX
+        }
+    })
 }
 
 fn begin_drag(state: &mut AppState, p: Pos2) -> Drag {

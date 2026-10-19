@@ -63,10 +63,68 @@ impl Skeleton {
         }
     }
 
+    pub fn empty() -> Skeleton {
+        Skeleton { joints: Vec::new(), parts: Vec::new() }
+    }
+
     pub fn bone(&self, part: usize) -> ([f32; 2], [f32; 2]) {
         let p = &self.parts[part];
         (self.joints[p.pivot].pos, self.joints[p.tip].pos)
     }
+
+    /// Add a joint with an automatic name ("joint 12"); returns its index.
+    pub fn add_joint(&mut self, pos: [f32; 2]) -> usize {
+        let name = unique_name("joint", self.joints.iter().map(|j| j.name.as_str()));
+        self.joints.push(Joint { name, pos });
+        self.joints.len() - 1
+    }
+
+    /// Add a bone from `pivot` (attachment end) to `tip`; returns the part index.
+    pub fn add_part(&mut self, pivot: usize, tip: usize) -> usize {
+        let name = unique_name("bone", self.parts.iter().map(|p| p.name.as_str()));
+        self.parts.push(SkelPart { name, pivot, tip });
+        self.parts.len() - 1
+    }
+
+    /// Remove a joint and every part attached to it.
+    pub fn remove_joint(&mut self, joint: usize) {
+        self.parts.retain(|p| p.pivot != joint && p.tip != joint);
+        self.drop_joint(joint);
+        self.prune_orphans();
+    }
+
+    /// Remove a part, and any joint no other part uses.
+    pub fn remove_part(&mut self, part: usize) {
+        self.parts.remove(part);
+        self.prune_orphans();
+    }
+
+    /// Delete one joint and shift the joint indices stored in parts.
+    fn drop_joint(&mut self, joint: usize) {
+        self.joints.remove(joint);
+        for p in &mut self.parts {
+            if p.pivot > joint {
+                p.pivot -= 1;
+            }
+            if p.tip > joint {
+                p.tip -= 1;
+            }
+        }
+    }
+
+    fn prune_orphans(&mut self) {
+        for j in (0..self.joints.len()).rev() {
+            if !self.parts.iter().any(|p| p.pivot == j || p.tip == j) {
+                self.drop_joint(j);
+            }
+        }
+    }
+}
+
+/// "prefix N" with the smallest N (from 1) not already in `taken`.
+fn unique_name<'a>(prefix: &str, taken: impl Iterator<Item = &'a str>) -> String {
+    let taken: Vec<&str> = taken.collect();
+    (1..).map(|n| format!("{prefix} {n}")).find(|name| !taken.contains(&name.as_str())).unwrap()
 }
 
 /// Approximate Euclidean distance from each pixel to the nearest pixel outside
@@ -108,7 +166,7 @@ pub fn distance_transform(mask: &Mask) -> Vec<f32> {
     d
 }
 
-pub(crate) fn dist_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+pub fn dist_to_segment(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let ab = [b[0] - a[0], b[1] - a[1]];
     let ap = [p[0] - a[0], p[1] - a[1]];
     let len2 = ab[0] * ab[0] + ab[1] * ab[1];
@@ -224,6 +282,30 @@ mod tests {
         // torso's center line, but well inside the torso's thickness.
         assert!(sm.masks[0].get(44, 40), "torso corner stays torso");
         assert!(sm.masks[0].get(50, 25));
+    }
+
+    #[test]
+    fn grow_and_remove_bones() {
+        let mut s = Skeleton::empty();
+        let a = s.add_joint([0.0, 0.0]);
+        let b = s.add_joint([10.0, 0.0]);
+        s.add_part(a, b);
+        let c = s.add_joint([20.0, 0.0]);
+        s.add_part(b, c); // grown from b
+        assert_eq!(s.parts[1].name, "bone 2");
+        assert_eq!(s.joints[2].name, "joint 3");
+
+        // Removing the shared joint takes both bones and leaves nothing behind.
+        let mut t = s.clone();
+        t.remove_joint(b);
+        assert!(t.parts.is_empty() && t.joints.is_empty());
+
+        // Removing the first bone drops joint a, and the second bone's indices shift.
+        s.remove_part(0);
+        assert_eq!(s.joints.len(), 2);
+        assert_eq!(s.bone(0), ([10.0, 0.0], [20.0, 0.0]));
+        assert_eq!(s.add_part(0, 1), 1);
+        assert_eq!(s.parts[1].name, "bone 1", "freed names are reused");
     }
 
     #[test]
