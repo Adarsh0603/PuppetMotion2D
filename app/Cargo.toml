@@ -1,0 +1,10 @@
+[package]
+name = "anim-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anim-core = { version = "0.1.0", path = "../core" }
+eframe = "0.37.0"
+image = "0.25.10"
+rfd = "0.17.2"
