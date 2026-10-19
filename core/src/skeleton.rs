@@ -8,23 +8,26 @@
 
 use crate::geom::RectI;
 use crate::mask::Mask;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Joint {
     pub name: String,
     pub pos: [f32; 2],
 }
 
 /// A body part spanning two joints. `pivot` is the end attached to the parent
-/// part (the rotation center later on); `tip` is the free end.
-#[derive(Clone, Debug, PartialEq)]
+/// part and the point the part rotates around; `tip` is the free end.
+/// `parent` is the part it hangs from (None for a root such as the torso).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SkelPart {
     pub name: String,
     pub pivot: usize,
     pub tip: usize,
+    pub parent: Option<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Skeleton {
     pub joints: Vec<Joint>,
     pub parts: Vec<SkelPart>,
@@ -49,17 +52,21 @@ impl Skeleton {
             ("right hip", at(0.58, 0.66)),
             ("right foot", at(0.62, 0.97)),
         ];
+        // (name, pivot, tip, parent part); the torso is the root.
         let parts = [
-            ("head", 1, 0),
-            ("torso", 2, 1),
-            ("left arm", 3, 4),
-            ("right arm", 5, 6),
-            ("left leg", 7, 8),
-            ("right leg", 9, 10),
+            ("head", 1, 0, Some(1)),
+            ("torso", 2, 1, None),
+            ("left arm", 3, 4, Some(1)),
+            ("right arm", 5, 6, Some(1)),
+            ("left leg", 7, 8, Some(1)),
+            ("right leg", 9, 10, Some(1)),
         ];
         Skeleton {
             joints: joints.iter().map(|&(n, pos)| Joint { name: n.into(), pos }).collect(),
-            parts: parts.iter().map(|&(n, pivot, tip)| SkelPart { name: n.into(), pivot, tip }).collect(),
+            parts: parts
+                .iter()
+                .map(|&(n, pivot, tip, parent)| SkelPart { name: n.into(), pivot, tip, parent })
+                .collect(),
         }
     }
 
@@ -80,23 +87,113 @@ impl Skeleton {
     }
 
     /// Add a bone from `pivot` (attachment end) to `tip`; returns the part index.
+    /// Its parent is guessed: the bone ending at `pivot`, else a bone starting
+    /// there, else the bone nearest to it (none if this is the first bone).
     pub fn add_part(&mut self, pivot: usize, tip: usize) -> usize {
         let name = unique_name("bone", self.parts.iter().map(|p| p.name.as_str()));
-        self.parts.push(SkelPart { name, pivot, tip });
+        let parent = self.guess_parent(pivot);
+        self.parts.push(SkelPart { name, pivot, tip, parent });
         self.parts.len() - 1
+    }
+
+    fn guess_parent(&self, pivot: usize) -> Option<usize> {
+        if let Some(i) = self.parts.iter().position(|p| p.tip == pivot) {
+            return Some(i);
+        }
+        if let Some(i) = self.parts.iter().position(|p| p.pivot == pivot) {
+            return Some(i);
+        }
+        let at = self.joints[pivot].pos;
+        (0..self.parts.len())
+            .map(|i| {
+                let (a, b) = self.bone(i);
+                (i, dist_to_segment(at, a, b))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     }
 
     /// Remove a joint and every part attached to it.
     pub fn remove_joint(&mut self, joint: usize) {
-        self.parts.retain(|p| p.pivot != joint && p.tip != joint);
+        for i in (0..self.parts.len()).rev() {
+            if self.parts[i].pivot == joint || self.parts[i].tip == joint {
+                self.drop_part(i);
+            }
+        }
         self.drop_joint(joint);
         self.prune_orphans();
     }
 
-    /// Remove a part, and any joint no other part uses.
+    /// Remove a part, and any joint no other part uses. Its children are
+    /// re-attached to its parent.
     pub fn remove_part(&mut self, part: usize) {
-        self.parts.remove(part);
+        self.drop_part(part);
         self.prune_orphans();
+    }
+
+    fn drop_part(&mut self, part: usize) {
+        let grandparent = self.parts[part].parent;
+        self.parts.remove(part);
+        for p in &mut self.parts {
+            p.parent = match p.parent {
+                Some(q) if q == part => grandparent.map(|g| if g > part { g - 1 } else { g }),
+                Some(q) if q > part => Some(q - 1),
+                other => other,
+            };
+        }
+    }
+
+    /// Parts directly attached to `part`.
+    pub fn children(&self, part: usize) -> impl Iterator<Item = usize> + '_ {
+        (0..self.parts.len()).filter(move |&i| self.parts[i].parent == Some(part))
+    }
+
+    /// Every part below `part` in the hierarchy (children, grandchildren, …).
+    pub fn descendants(&self, part: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut stack = vec![part];
+        while let Some(p) = stack.pop() {
+            for c in self.children(p) {
+                if !out.contains(&c) && c != part {
+                    out.push(c);
+                    stack.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    /// Re-attach `part` under `parent`. Refused (returns false) if that would
+    /// create a loop, i.e. `parent` is the part itself or one of its descendants.
+    pub fn set_parent(&mut self, part: usize, parent: Option<usize>) -> bool {
+        if let Some(p) = parent
+            && (p == part || p >= self.parts.len() || self.descendants(part).contains(&p))
+        {
+            return false;
+        }
+        self.parts[part].parent = parent;
+        true
+    }
+
+    /// All parts with every parent before its children: the order to compute
+    /// transforms in and to draw in (children on top).
+    pub fn draw_order(&self) -> Vec<usize> {
+        let mut order = Vec::with_capacity(self.parts.len());
+        let mut seen = vec![false; self.parts.len()];
+        let roots: Vec<usize> = (0..self.parts.len())
+            .filter(|&i| self.parts[i].parent.is_none_or(|p| p >= self.parts.len()))
+            .collect();
+        let mut queue: std::collections::VecDeque<usize> = roots.into();
+        while let Some(p) = queue.pop_front() {
+            if std::mem::replace(&mut seen[p], true) {
+                continue;
+            }
+            order.push(p);
+            queue.extend(self.children(p));
+        }
+        // Anything unreachable (only possible with a corrupted loop) goes last.
+        order.extend((0..self.parts.len()).filter(|&i| !seen[i]));
+        order
     }
 
     /// Delete one joint and shift the joint indices stored in parts.
@@ -211,18 +308,42 @@ pub fn skeleton_masks(fg: &Mask, skel: &Skeleton) -> SkeletonMasks {
     if bones.is_empty() {
         return SkeletonMasks { masks, radii };
     }
+    // A part stops dead at a joint where it meets another part, like a paper
+    // cut-out cut straight across: at its pivot if it hangs from a parent, and
+    // at its tip if other parts hang from that joint. Only free ends (a hand,
+    // the top of the head) keep a rounded end. Without this, a fat part's
+    // rounded end reaches past the joint into its neighbour (a big head
+    // would take the top of the torso and swing it around when posed).
+    let cut_at_pivot: Vec<bool> = skel.parts.iter().map(|p| p.parent.is_some()).collect();
+    let cut_at_tip: Vec<bool> = skel.parts.iter().map(|p| skel.parts.iter().any(|q| q.pivot == p.tip)).collect();
     for y in 0..fg.h {
         for x in 0..fg.w {
             if !fg.get(x, y) {
                 continue;
             }
             let p = [x as f32 + 0.5, y as f32 + 0.5];
-            let cost = |i: usize| dist_to_segment(p, bones[i].0, bones[i].1) - radii[i];
-            let best = (0..bones.len()).min_by(|&a, &b| cost(a).total_cmp(&cost(b))).unwrap();
+            let capsule = |i: usize| dist_to_segment(p, bones[i].0, bones[i].1) - radii[i];
+            let cost = |i: usize| {
+                let t = along(p, bones[i].0, bones[i].1);
+                if (t < 0.0 && cut_at_pivot[i]) || (t > 1.0 && cut_at_tip[i]) { f32::INFINITY } else { capsule(i) }
+            };
+            let mut best = (0..bones.len()).min_by(|&a, &b| cost(a).total_cmp(&cost(b))).unwrap();
+            if cost(best).is_infinite() {
+                // Outside every part's span (e.g. a stray blob): nearest capsule wins.
+                best = (0..bones.len()).min_by(|&a, &b| capsule(a).total_cmp(&capsule(b))).unwrap();
+            }
             masks[best].set(x, y, true);
         }
     }
     SkeletonMasks { masks, radii }
+}
+
+/// Where `p` falls along the bone a→b: 0 at `a`, 1 at `b`, outside [0, 1]
+/// beyond either end.
+fn along(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+    if len2 == 0.0 { 0.5 } else { ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / len2 }
 }
 
 #[cfg(test)]
@@ -256,8 +377,8 @@ mod tests {
         let skel = Skeleton {
             joints: vec![j("pelvis", 60.0, 95.0), j("neck", 60.0, 22.0), j("shoulder", 42.0, 26.0), j("hand", 6.0, 26.0)],
             parts: vec![
-                SkelPart { name: "torso".into(), pivot: 0, tip: 1 },
-                SkelPart { name: "arm".into(), pivot: 2, tip: 3 },
+                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None },
+                SkelPart { name: "arm".into(), pivot: 2, tip: 3, parent: Some(0) },
             ],
         };
         (fg, skel)
@@ -306,6 +427,72 @@ mod tests {
         assert_eq!(s.bone(0), ([10.0, 0.0], [20.0, 0.0]));
         assert_eq!(s.add_part(0, 1), 1);
         assert_eq!(s.parts[1].name, "bone 1", "freed names are reused");
+    }
+
+    #[test]
+    fn big_head_stops_at_the_neck() {
+        // Big round head (r 40) on a narrow torso (20 px wide).
+        let mut fg = Mask::new(120, 200);
+        for y in 0..200u32 {
+            for x in 0..120u32 {
+                let head = (x as f32 - 60.0).powi(2) + (y as f32 - 50.0).powi(2) <= 1600.0;
+                let torso = (50..70).contains(&x) && (88..180).contains(&y);
+                if head || torso {
+                    fg.set(x, y, true);
+                }
+            }
+        }
+        let j = |name: &str, x: f32, y: f32| Joint { name: name.into(), pos: [x, y] };
+        let skel = Skeleton {
+            joints: vec![j("pelvis", 60.0, 175.0), j("neck", 60.0, 90.0), j("head top", 60.0, 12.0)],
+            parts: vec![
+                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None },
+                SkelPart { name: "head".into(), pivot: 1, tip: 2, parent: Some(0) },
+            ],
+        };
+        let sm = skeleton_masks(&fg, &skel);
+        assert!(sm.radii[1] > 2.0 * sm.radii[0], "head is much fatter: {:?}", sm.radii);
+        for (x, y) in [(52, 92), (60, 95), (68, 100)] {
+            assert!(sm.masks[0].get(x, y), "({x},{y}) below the neck belongs to the torso");
+        }
+        assert!(sm.masks[1].get(60, 50) && sm.masks[1].get(25, 50), "head keeps the whole head");
+        assert!(sm.masks[1].get(60, 13), "free end (head top) is still covered");
+    }
+
+    #[test]
+    fn parents_are_guessed_and_kept_consistent() {
+        let mut s = Skeleton::person_front(RectI::new(0, 0, 100, 200));
+        let torso = 1;
+        assert_eq!(s.draw_order()[0], torso, "root first");
+        assert!(s.children(torso).count() == 5);
+
+        // Grow a forearm from the left hand: its parent is the left arm.
+        let hand = s.parts[2].tip;
+        let tip = s.add_joint([0.0, 150.0]);
+        let forearm = s.add_part(hand, tip);
+        assert_eq!(s.parts[forearm].parent, Some(2));
+        // A bone started on empty space attaches to the nearest bone.
+        let a = s.add_joint([52.0, 120.0]);
+        let b = s.add_joint([70.0, 120.0]);
+        let tail = s.add_part(a, b);
+        assert_eq!(s.parts[tail].parent, Some(torso));
+
+        // No loops: the torso can't hang from its own descendant.
+        assert!(!s.set_parent(torso, Some(forearm)));
+        assert!(!s.set_parent(2, Some(2)));
+        assert!(s.set_parent(tail, Some(4)));
+
+        // Removing the left arm re-attaches the forearm to the torso.
+        s.remove_part(2);
+        let forearm = s.parts.iter().position(|p| p.name == "bone 1").unwrap();
+        assert_eq!(s.parts[forearm].parent, Some(torso));
+        let order = s.draw_order();
+        assert_eq!(order.len(), s.parts.len());
+        for (i, &p) in order.iter().enumerate() {
+            if let Some(parent) = s.parts[p].parent {
+                assert!(order[..i].contains(&parent), "parent drawn before child");
+            }
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use crate::state::{AppState, Mode, SkelSel, box_color};
 use anim_core::skeleton::dist_to_segment;
-use anim_core::{PartBox, RectI};
+use anim_core::{PartBox, RectI, angle_to_point, posed_joint, world_transforms};
 use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
 const HANDLE_PX: f32 = 6.0;
@@ -66,6 +66,10 @@ pub enum Drag {
     /// Moving a joint. `new_bone` is set when the joint is the tip of a bone
     /// created by this drag (Shift+drag), which is dropped if left too short.
     Joint { index: usize, new_bone: bool },
+    /// Pose mode: rotating a part by its tip.
+    PoseRotate { part: usize },
+    /// Pose mode: moving the whole figure by a root's pivot.
+    PoseMove,
 }
 
 /// A bone shorter than this (image px) after Shift+drag is discarded.
@@ -107,6 +111,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         match state.mode {
             Mode::Boxes => state.delete_selected(),
             Mode::Joints => state.delete_skel_selection(),
+            Mode::Pose => {}
         }
     }
     if state.mode == Mode::Boxes && response.hovered() && key(Key::A) {
@@ -124,6 +129,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     handle_pointer(ui, &response, canvas, state);
     state.refresh_overlay(ui.ctx());
+    if state.mode == Mode::Pose {
+        state.refresh_sprites(ui.ctx());
+    }
 
     // Draw image, overlay, boxes.
     let view = state.view;
@@ -131,6 +139,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let image_rect = Rect::from_min_size(view.image_to_screen(canvas, Pos2::ZERO), image_size * view.zoom);
     let uv = Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0));
     let painter = painter.with_clip_rect(canvas);
+    if state.mode == Mode::Pose {
+        if state.show_ghost {
+            painter.image(doc.texture.id(), image_rect, uv, Color32::from_white_alpha(50));
+        }
+        draw_posed(&painter, canvas, state, response.hover_pos());
+        return;
+    }
     painter.image(doc.texture.id(), image_rect, uv, Color32::WHITE);
     if let Some(overlay) = &doc.overlay {
         painter.image(overlay.id(), image_rect, uv, Color32::WHITE);
@@ -138,7 +153,79 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     match state.mode {
         Mode::Boxes => draw_boxes(&painter, canvas, state),
         Mode::Joints => draw_skeleton(&painter, canvas, state, response.hover_pos()),
+        Mode::Pose => unreachable!(),
     }
+}
+
+/// Posed joint positions (image coordinates), one per joint.
+fn posed_joints(state: &AppState) -> Vec<[f32; 2]> {
+    let Some(doc) = &state.doc else { return Vec::new() };
+    let t = world_transforms(&doc.skeleton, &doc.pose);
+    (0..doc.skeleton.joints.len()).map(|j| posed_joint(&doc.skeleton, &t, j)).collect()
+}
+
+/// Index of the point (image coordinates) nearest to screen position `p`, within a few points.
+fn hit_point(state: &AppState, canvas: Rect, points: &[[f32; 2]], p: Pos2) -> Option<usize> {
+    points
+        .iter()
+        .enumerate()
+        .map(|(i, q)| (i, state.view.image_to_screen(canvas, pos2(q[0], q[1])).distance(p)))
+        .filter(|&(_, d)| d <= JOINT_HIT_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// Pose mode: every part's sprite moved by its part's transform, parents
+/// first so children sit on top, then the posed skeleton.
+fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Option<Pos2>) {
+    let view = state.view;
+    let doc = state.doc.as_ref().unwrap();
+    let skel = &doc.skeleton;
+    let t = world_transforms(skel, &doc.pose);
+    let to_screen = |p: [f32; 2]| view.image_to_screen(canvas, pos2(p[0], p[1]));
+
+    for p in skel.draw_order() {
+        let (Some(sprite), Some(Some(tex))) = (doc.sprites.get(p), doc.sprite_tex.get(p)) else { continue };
+        let [ox, oy] = [sprite.origin[0] as f32, sprite.origin[1] as f32];
+        let [w, h] = [sprite.image.width() as f32, sprite.image.height() as f32];
+        let corners = [[ox, oy], [ox + w, oy], [ox + w, oy + h], [ox, oy + h]];
+        let uvs = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0), pos2(0.0, 1.0)];
+        let mut mesh = egui::Mesh::with_texture(tex.id());
+        for (c, uv) in corners.iter().zip(uvs) {
+            mesh.vertices.push(egui::epaint::Vertex { pos: to_screen(t[p].apply(*c)), uv, color: Color32::WHITE });
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        painter.add(egui::Shape::mesh(mesh));
+    }
+
+    let joints = posed_joints(state);
+    for (i, part) in skel.parts.iter().enumerate() {
+        let (a, b) = (to_screen(joints[part.pivot]), to_screen(joints[part.tip]));
+        painter.line_segment([a, b], Stroke::new(3.0, Color32::from_black_alpha(140)));
+        painter.line_segment([a, b], Stroke::new(1.5, box_color(i)));
+    }
+    let active = match state.drag {
+        Drag::PoseRotate { part } => Some(skel.parts[part].tip),
+        _ => hover.and_then(|h| hit_point(state, canvas, &joints, h)),
+    };
+    for (j, &pos) in joints.iter().enumerate() {
+        let r = if active == Some(j) { 7.0 } else { 5.0 };
+        let fill = if pose_drag_for_joint(skel, j).is_some() { Color32::WHITE } else { Color32::GRAY };
+        painter.circle(to_screen(pos), r, fill, Stroke::new(1.5, Color32::BLACK));
+    }
+    if let Some(j) = active {
+        label(painter, to_screen(joints[j]) + vec2(10.0, -10.0), &skel.joints[j].name);
+    }
+}
+
+/// What dragging joint `j` does in Pose mode: rotate the part it is the tip
+/// of, or move the figure if it is a root's pivot. Grey (undraggable) otherwise.
+fn pose_drag_for_joint(skel: &anim_core::Skeleton, j: usize) -> Option<Drag> {
+    if let Some(part) = skel.parts.iter().position(|p| p.tip == j) {
+        return Some(Drag::PoseRotate { part });
+    }
+    skel.parts.iter().any(|p| p.pivot == j && p.parent.is_none()).then_some(Drag::PoseMove)
 }
 
 fn draw_skeleton(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Option<Pos2>) {
@@ -221,12 +308,14 @@ fn begin_joint_drag(state: &mut AppState, canvas: Rect, o: Pos2, shift: bool) ->
         (Some(pivot), true) => {
             let tip = doc.skeleton.add_joint(p);
             state.skel_sel = SkelSel::Part(doc.skeleton.add_part(pivot, tip));
+            doc.reset_pose();
             Drag::Joint { index: tip, new_bone: true }
         }
         (None, true) => {
             let pivot = doc.skeleton.add_joint(p);
             let tip = doc.skeleton.add_joint(p);
             state.skel_sel = SkelSel::Part(doc.skeleton.add_part(pivot, tip));
+            doc.reset_pose();
             Drag::Joint { index: tip, new_bone: true }
         }
         (None, false) => Drag::None,
@@ -311,6 +400,11 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
             match state.mode {
                 Mode::Boxes => begin_drag(state, view.screen_to_image(canvas, o)),
                 Mode::Joints => begin_joint_drag(state, canvas, o, shift),
+                Mode::Pose => {
+                    let joints = posed_joints(state);
+                    let skel = &state.doc.as_ref().unwrap().skeleton;
+                    hit_point(state, canvas, &joints, o).and_then(|j| pose_drag_for_joint(skel, j)).unwrap_or(Drag::None)
+                }
             }
         } else {
             Drag::None
@@ -330,6 +424,20 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
                     let (w, h) = doc.image.dimensions();
                     doc.skeleton.joints[index].pos = [p.x.clamp(0.0, w as f32), p.y.clamp(0.0, h as f32)];
                     doc.recompute_skeleton();
+                }
+            }
+            &mut Drag::PoseRotate { part } => {
+                if let (Some(p), Some(doc)) = (pointer_img, &mut state.doc) {
+                    let t = world_transforms(&doc.skeleton, &doc.pose);
+                    let angle = angle_to_point(&doc.skeleton, &doc.pose, &t, part, [p.x, p.y]);
+                    doc.pose.set_angle(part, angle);
+                }
+            }
+            Drag::PoseMove => {
+                if let Some(doc) = &mut state.doc {
+                    let d = response.drag_delta() / view.zoom;
+                    doc.pose.offset[0] += d.x;
+                    doc.pose.offset[1] += d.y;
                 }
             }
             _ => {}
@@ -364,6 +472,7 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
                     (None, None) => SkelSel::None,
                 };
             }
+            Mode::Pose => {}
         }
     }
 }
@@ -436,7 +545,7 @@ fn finish_drag(state: &mut AppState) {
             }
             ok
         }
-        Drag::None | Drag::Pan | Drag::Joint { .. } => false,
+        Drag::None | Drag::Pan | Drag::Joint { .. } | Drag::PoseRotate { .. } | Drag::PoseMove => false,
     };
     if changed {
         state.recompute_parts();

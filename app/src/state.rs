@@ -1,6 +1,7 @@
 use crate::canvas::{Drag, View};
 use anim_core::{
-    Axis, History, Mask, Params, PartBox, RectI, Skeleton, foreground_mask, part_masks, skeleton_masks,
+    Axis, History, Mask, Params, PartBox, Pose, RectI, Skeleton, Sprite, build_sprites, foreground_mask, part_masks,
+    skeleton_masks, write_parts,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
@@ -30,11 +31,12 @@ pub fn box_color(i: usize) -> Color32 {
     Color32::from_rgb(r, g, b)
 }
 
-/// How parts are labeled: by drawing boxes, or by placing skeleton joints.
+/// What the canvas is for: placing joints, drawing boxes, or posing the cut-out parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Boxes,
     Joints,
+    Pose,
 }
 
 /// What is selected in joints mode.
@@ -51,6 +53,7 @@ pub enum SkelSel {
 pub struct Snapshot {
     pub skeleton: Skeleton,
     pub boxes: Vec<PartBox>,
+    pub pose: Pose,
 }
 
 pub struct BoxItem {
@@ -74,17 +77,36 @@ pub struct Doc {
     pub overlay: Option<TextureHandle>,
     pub overlay_dirty: bool,
     pub history: History<Snapshot>,
+    /// File name without extension, used to name exported parts.
+    pub name: String,
+    pub pose: Pose,
+    /// Cut-out parts and their textures (None for an empty part), rebuilt when
+    /// `sprites_dirty` is set.
+    pub sprites: Vec<Sprite>,
+    pub sprite_tex: Vec<Option<TextureHandle>>,
+    pub sprites_dirty: bool,
 }
 
 impl Doc {
     pub fn snapshot(&self) -> Snapshot {
-        Snapshot { skeleton: self.skeleton.clone(), boxes: self.boxes.iter().map(|b| b.part).collect() }
+        Snapshot {
+            skeleton: self.skeleton.clone(),
+            boxes: self.boxes.iter().map(|b| b.part).collect(),
+            pose: self.pose.clone(),
+        }
     }
 
-    /// Put back a snapshot's joints and boxes (masks are recomputed by the caller).
+    /// Put back a snapshot's joints, boxes and pose (masks are recomputed by the caller).
     fn restore(&mut self, s: Snapshot) {
         self.skeleton = s.skeleton;
         self.boxes = s.boxes.into_iter().map(|part| BoxItem { part, mask: Mask::new(0, 0), pixels: 0 }).collect();
+        self.pose = s.pose;
+    }
+
+    /// Back to the pose as drawn. Needed whenever bones are added or removed,
+    /// since pose angles are stored by part number.
+    pub fn reset_pose(&mut self) {
+        self.pose = Pose::rest(self.skeleton.parts.len());
     }
 
     pub fn size(&self) -> egui::Vec2 {
@@ -114,6 +136,7 @@ impl Doc {
         self.skel_masks = sm.masks;
         self.skel_radii = sm.radii;
         self.overlay_dirty = true;
+        self.sprites_dirty = true;
     }
 
     /// Place the template skeleton over the figure's bounding box.
@@ -121,6 +144,7 @@ impl Doc {
         let (w, h) = self.image.dimensions();
         let bbox = self.fg.bbox().unwrap_or(RectI::new(0, 0, w as i32, h as i32));
         self.skeleton = Skeleton::person_front(bbox);
+        self.reset_pose();
         self.recompute_skeleton();
     }
 }
@@ -148,6 +172,10 @@ pub struct AppState {
     pub resolve_overlaps: bool,
     /// Draw each skeleton part's measured thickness as a translucent capsule.
     pub show_capsules: bool,
+    /// Joint disc radius as a multiple of the child part's thickness (0 = no discs).
+    pub overlap: f32,
+    /// Pose mode: show the original drawing faintly behind the posed parts.
+    pub show_ghost: bool,
     pub status: String,
     /// Set when a new image is loaded so the canvas fits it on the next frame.
     pub fit_pending: bool,
@@ -171,6 +199,8 @@ impl Default for AppState {
             show_overlap: true,
             resolve_overlaps: true,
             show_capsules: false,
+            overlap: 1.0,
+            show_ghost: false,
             status: "Open or drop an image to start.".into(),
             fit_pending: false,
         }
@@ -218,6 +248,11 @@ impl AppState {
             overlay: None,
             overlay_dirty: true,
             history: History::new(UNDO_LIMIT),
+            name: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+            pose: Pose::default(),
+            sprites: Vec::new(),
+            sprite_tex: Vec::new(),
+            sprites_dirty: true,
         };
         doc.fit_skeleton();
         self.doc = Some(doc);
@@ -290,13 +325,45 @@ impl AppState {
     }
 
     /// Run `edit` on the skeleton as one undoable step, then recompute masks.
+    /// The pose goes back to rest, since parts may have been added or removed.
     pub fn edit_skeleton(&mut self, edit: impl FnOnce(&mut Skeleton)) {
         let before = self.snapshot();
         let Some(doc) = &mut self.doc else { return };
         edit(&mut doc.skeleton);
+        doc.reset_pose();
         doc.recompute_skeleton();
         self.commit(before);
         self.fix_selection();
+    }
+
+    /// Rebuild the cut-out part images if the parts or the overlap changed.
+    pub fn refresh_sprites(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &mut self.doc else { return };
+        if !doc.sprites_dirty {
+            return;
+        }
+        doc.sprites_dirty = false;
+        doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.skeleton, &doc.skel_masks, self.overlap);
+        doc.sprite_tex = doc
+            .sprites
+            .iter()
+            .map(|s| {
+                (s.image.width() > 0)
+                    .then(|| ctx.load_texture(format!("part {}", s.part), to_color_image(&s.image), TextureOptions::LINEAR))
+            })
+            .collect();
+    }
+
+    /// Ask for a folder and write one PNG per part plus rig.json into `<folder>/<image>_parts/`.
+    fn export_parts(&mut self, ctx: &egui::Context) {
+        self.refresh_sprites(ctx);
+        let Some(doc) = &self.doc else { return };
+        let Some(folder) = rfd::FileDialog::new().set_title("Export parts into…").pick_folder() else { return };
+        let dir = folder.join(format!("{}_parts", doc.name));
+        self.status = match write_parts(&dir, &doc.sprites, &doc.skeleton) {
+            Ok(()) => format!("Exported {} parts to {}", doc.sprites.len(), dir.display()),
+            Err(e) => format!("Export failed: {e}"),
+        };
     }
 
     /// Delete the selected joint or bone (joints mode).
@@ -342,7 +409,7 @@ impl AppState {
         if self.show_parts {
             let masks: Vec<&Mask> = match self.mode {
                 Mode::Boxes => doc.boxes.iter().map(|b| &b.mask).collect(),
-                Mode::Joints => doc.skel_masks.iter().collect(),
+                Mode::Joints | Mode::Pose => doc.skel_masks.iter().collect(),
             };
             for (i, m) in masks.into_iter().enumerate() {
                 let [r, g, bl] = PALETTE[i % PALETTE.len()];
@@ -384,8 +451,9 @@ impl AppState {
 
         let mode = self.mode;
         ui.horizontal(|ui| {
-            ui.strong("Label with");
+            ui.strong("Mode");
             ui.selectable_value(&mut self.mode, Mode::Joints, "Joints");
+            ui.selectable_value(&mut self.mode, Mode::Pose, "Pose");
             ui.selectable_value(&mut self.mode, Mode::Boxes, "Boxes");
         });
         if mode != self.mode {
@@ -415,12 +483,18 @@ impl AppState {
         }
 
         let toggles = (self.show_fg, self.show_parts, self.show_overlap);
-        ui.checkbox(&mut self.show_fg, "Show full foreground");
-        ui.checkbox(&mut self.show_parts, "Show part masks");
-        if self.mode == Mode::Boxes {
-            ui.checkbox(&mut self.show_overlap, "Show overlaps (orange)");
-        } else {
-            ui.checkbox(&mut self.show_capsules, "Show part thickness");
+        match self.mode {
+            Mode::Boxes => {
+                ui.checkbox(&mut self.show_fg, "Show full foreground");
+                ui.checkbox(&mut self.show_parts, "Show part masks");
+                ui.checkbox(&mut self.show_overlap, "Show overlaps (orange)");
+            }
+            Mode::Joints => {
+                ui.checkbox(&mut self.show_fg, "Show full foreground");
+                ui.checkbox(&mut self.show_parts, "Show part masks");
+                ui.checkbox(&mut self.show_capsules, "Show part thickness");
+            }
+            Mode::Pose => {}
         }
         if toggles != (self.show_fg, self.show_parts, self.show_overlap)
             && let Some(doc) = &mut self.doc
@@ -432,7 +506,41 @@ impl AppState {
         match self.mode {
             Mode::Boxes => self.boxes_section(ui),
             Mode::Joints => self.joints_section(ui),
+            Mode::Pose => self.pose_section(ui),
         }
+    }
+
+    fn pose_section(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Pose");
+        if self.doc.is_none() {
+            return;
+        }
+        if ui.button("Reset pose").clicked() {
+            let before = self.snapshot();
+            if let Some(doc) = &mut self.doc {
+                doc.reset_pose();
+            }
+            self.commit(before);
+        }
+        let overlap = self.overlap;
+        ui.add(egui::Slider::new(&mut self.overlap, 0.0..=2.0).text("joint overlap"))
+            .on_hover_text("How big a round blob each part keeps at its joints so rotating a child leaves no gap");
+        if overlap != self.overlap
+            && let Some(doc) = &mut self.doc
+        {
+            doc.sprites_dirty = true;
+        }
+        ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
+        if ui.button("Export parts…").on_hover_text("One PNG per part plus rig.json").clicked() {
+            self.export_parts(ui.ctx());
+        }
+        ui.separator();
+        ui.small(
+            "Drag a bone's end dot: rotate that part (children follow)\n\
+             Drag the root's start dot: move the whole figure\n\
+             Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
+             Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
+        );
     }
 
     fn joints_section(&mut self, ui: &mut egui::Ui) {
@@ -497,6 +605,9 @@ impl AppState {
                 let before = self.rename_before.take();
                 self.commit(before);
             }
+            if let SkelSel::Part(p) = sel {
+                self.parent_picker(ui, p);
+            }
             let delete = if matches!(sel, SkelSel::Joint(_)) { "Delete joint and its bones" } else { "Delete bone" };
             if ui.button(delete).clicked() {
                 self.delete_skel_selection();
@@ -512,6 +623,33 @@ impl AppState {
              Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
              Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
         );
+    }
+
+    /// "Attached to" dropdown: which part bone `p` hangs from. Its own
+    /// descendants are left out so the hierarchy can't loop.
+    fn parent_picker(&mut self, ui: &mut egui::Ui, p: usize) {
+        let Some(doc) = &self.doc else { return };
+        let skel = &doc.skeleton;
+        let current = skel.parts[p].parent;
+        let name = |q: Option<usize>| q.map_or("nothing (root)".to_string(), |q| skel.parts[q].name.clone());
+        let excluded = skel.descendants(p);
+        let options: Vec<Option<usize>> = std::iter::once(None)
+            .chain((0..skel.parts.len()).filter(|&q| q != p && !excluded.contains(&q)).map(Some))
+            .collect();
+        let mut chosen = current;
+        ui.horizontal(|ui| {
+            ui.label("Attached to");
+            egui::ComboBox::from_id_salt(("parent", p)).selected_text(name(current)).show_ui(ui, |ui| {
+                for &q in &options {
+                    ui.selectable_value(&mut chosen, q, name(q));
+                }
+            });
+        });
+        if chosen != current {
+            self.edit_skeleton(|s| {
+                s.set_parent(p, chosen);
+            });
+        }
     }
 
     fn boxes_section(&mut self, ui: &mut egui::Ui) {
@@ -615,6 +753,32 @@ mod tests {
         assert_eq!(bone_count(&state), 6);
         let names: Vec<_> = state.doc.as_ref().unwrap().skeleton.parts.iter().map(|p| p.name.clone()).collect();
         assert!(!names.contains(&"head".to_string()) && names.contains(&"bone 1".to_string()));
+    }
+
+    #[test]
+    fn pose_undo_and_reset_on_skeleton_edit() {
+        let mut state = open_sample();
+        let ctx = egui::Context::default();
+        state.refresh_sprites(&ctx);
+        let doc = state.doc.as_ref().unwrap();
+        assert_eq!(doc.sprites.len(), 6);
+        assert!(doc.sprite_tex.iter().all(Option::is_some), "every template part has pixels");
+
+        // Pose the left arm as one undoable step (what a drag does).
+        let before = state.snapshot();
+        state.doc.as_mut().unwrap().pose.set_angle(2, 1.0);
+        state.commit(before);
+        state.undo();
+        assert_eq!(state.doc.as_ref().unwrap().pose.angle(2), 0.0, "undo returns to rest");
+        state.redo();
+        assert_eq!(state.doc.as_ref().unwrap().pose.angle(2), 1.0);
+
+        // Changing the bones resets the pose; undo brings back bones and pose together.
+        state.edit_skeleton(|s| s.remove_part(0));
+        assert!(state.doc.as_ref().unwrap().pose.angles.iter().all(|&a| a == 0.0));
+        state.undo();
+        assert_eq!(bone_count(&state), 6);
+        assert_eq!(state.doc.as_ref().unwrap().pose.angle(2), 1.0);
     }
 
     #[test]
