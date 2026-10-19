@@ -2,7 +2,7 @@
 
 use crate::state::{AppState, Mode, SkelSel, box_color};
 use anim_core::skeleton::dist_to_segment;
-use anim_core::{PartBox, RectI, angle_to_point, posed_joint, world_transforms};
+use anim_core::{Affine2, PartBox, RectI, aim_part, ik_parent, posed_joint, solve_two_bone, world_transforms};
 use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
 
 const HANDLE_PX: f32 = 6.0;
@@ -199,6 +199,17 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
         painter.add(egui::Shape::mesh(mesh));
     }
 
+    // While rotating a part, show the range its limit allows (and its upper
+    // part's, when IK is moving both).
+    if let Drag::PoseRotate { part } = state.drag {
+        draw_limit_arc(painter, canvas, state, &t, part);
+        if state.ik
+            && let Some(upper) = ik_parent(skel, part)
+        {
+            draw_limit_arc(painter, canvas, state, &t, upper);
+        }
+    }
+
     let joints = posed_joints(state);
     for (i, part) in skel.parts.iter().enumerate() {
         let (a, b) = (to_screen(joints[part.pivot]), to_screen(joints[part.tip]));
@@ -217,6 +228,42 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
     if let Some(j) = active {
         label(painter, to_screen(joints[j]) + vec2(10.0, -10.0), &skel.joints[j].name);
     }
+}
+
+/// A wedge at a part's pivot showing the directions its limit allows the bone
+/// to point, measured from where the parent currently holds it.
+fn draw_limit_arc(painter: &egui::Painter, canvas: Rect, state: &AppState, t: &[Affine2], part: usize) {
+    let doc = state.doc.as_ref().unwrap();
+    let skel = &doc.skeleton;
+    let Some([lo, hi]) = skel.parts[part].limit else { return };
+    let (pivot, tip) = skel.bone(part);
+    // The parent's transform: the part's own transform with its own rotation undone.
+    let parent = t[part].mul(&Affine2::rotate_about(pivot, -doc.pose.angle(part)));
+    let center = parent.apply(pivot);
+    let rest_dir = parent.apply_vec([tip[0] - pivot[0], tip[1] - pivot[1]]);
+    let base = rest_dir[1].atan2(rest_dir[0]);
+    let c = state.view.image_to_screen(canvas, pos2(center[0], center[1]));
+    let r = 45.0;
+    let steps = 32;
+    let mut points = vec![c];
+    for i in 0..=steps {
+        let a = base + lo + (hi - lo) * i as f32 / steps as f32;
+        points.push(c + vec2(a.cos(), a.sin()) * r);
+    }
+    points.push(c);
+    let fill = Color32::from_rgba_unmultiplied(255, 220, 80, 40);
+    let stroke = Stroke::new(1.5, Color32::from_rgba_unmultiplied(255, 220, 80, 200));
+    // A wedge wider than 180° isn't convex, so fill it as a triangle fan.
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(c, fill);
+    for p in &points[1..points.len() - 1] {
+        mesh.colored_vertex(*p, fill);
+    }
+    for i in 1..steps as u32 + 1 {
+        mesh.add_triangle(0, i, i + 1);
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    painter.add(egui::Shape::line(points, stroke));
 }
 
 /// What dragging joint `j` does in Pose mode: rotate the part it is the tip
@@ -428,9 +475,12 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
             }
             &mut Drag::PoseRotate { part } => {
                 if let (Some(p), Some(doc)) = (pointer_img, &mut state.doc) {
-                    let t = world_transforms(&doc.skeleton, &doc.pose);
-                    let angle = angle_to_point(&doc.skeleton, &doc.pose, &t, part, [p.x, p.y]);
-                    doc.pose.set_angle(part, angle);
+                    let target = [p.x, p.y];
+                    if state.ik {
+                        solve_two_bone(&doc.skeleton, &mut doc.pose, part, target);
+                    } else {
+                        aim_part(&doc.skeleton, &mut doc.pose, part, target);
+                    }
                 }
             }
             Drag::PoseMove => {

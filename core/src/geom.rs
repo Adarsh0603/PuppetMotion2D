@@ -1,5 +1,5 @@
 /// Axis-aligned rectangle in image pixel coordinates. `w`/`h` may be zero.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RectI {
     pub x: i32,
     pub y: i32,

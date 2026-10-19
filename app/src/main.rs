@@ -18,7 +18,7 @@ fn main() -> eframe::Result {
         "PuppetMotion 2D",
         options,
         Box::new(move |cc| {
-            let mut app = App { state: AppState::default() };
+            let mut app = App { state: AppState::default(), title: String::new() };
             if let Some(path) = initial {
                 app.state.open(&cc.egui_ctx, &path);
             }
@@ -29,35 +29,44 @@ fn main() -> eframe::Result {
 
 struct App {
     state: AppState,
+    /// Window title last sent, so it's only updated when it changes.
+    title: String,
 }
 
 impl App {
-    /// Global undo/redo keys. Skipped while a text box has focus (it has its
-    /// own undo) and mid-drag (the drag's undo step isn't recorded yet).
+    /// Global keys: undo/redo, save, open. Skipped while a text box has focus
+    /// (it has its own undo) and mid-drag (the drag's undo step isn't recorded yet).
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.text_edit_focused() {
             return;
         }
-        if self.state.rename_before.is_some() {
-            // A name edit just ended without a lost-focus event; record it.
-            let before = self.state.rename_before.take();
+        if self.state.field_before.is_some() && !ctx.egui_is_using_pointer() {
+            // A field edit (name, limit) ended without a lost-focus or
+            // drag-stopped event; record it now.
+            let before = self.state.field_before.take();
             self.state.commit(before);
         }
         if !matches!(self.state.drag, canvas::Drag::None) {
             return;
         }
         use egui::{Key, KeyboardShortcut, Modifiers};
-        // Check the Shift version first: plain Ctrl+Z also matches Ctrl+Shift+Z.
-        let (redo, undo) = ctx.input_mut(|i| {
-            let redo = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z))
-                || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Y));
-            let undo = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z));
-            (redo, undo)
-        });
+        let pressed = |ctx: &egui::Context, mods: Modifiers, key: Key| {
+            ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(mods, key)))
+        };
+        // Check Shift versions first: plain Ctrl+Z also matches Ctrl+Shift+Z.
+        let redo = pressed(ctx, Modifiers::COMMAND | Modifiers::SHIFT, Key::Z) || pressed(ctx, Modifiers::COMMAND, Key::Y);
         if redo {
             self.state.redo();
-        } else if undo {
+        } else if pressed(ctx, Modifiers::COMMAND, Key::Z) {
             self.state.undo();
+        }
+        if pressed(ctx, Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+            self.state.save_as();
+        } else if pressed(ctx, Modifiers::COMMAND, Key::S) {
+            self.state.save();
+        }
+        if pressed(ctx, Modifiers::COMMAND, Key::O) {
+            self.state.open_dialog(ctx);
         }
     }
 }
@@ -77,5 +86,11 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             canvas::show(ui, &mut self.state);
         });
+
+        let title = self.state.title();
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
     }
 }

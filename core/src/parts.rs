@@ -12,7 +12,7 @@ use crate::mask::Mask;
 use crate::skeleton::dist_to_segment;
 
 /// Which line through the box acts as the part's bone.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Axis {
     /// Along the box's longer side.
     #[default]
@@ -44,7 +44,7 @@ impl Axis {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PartBox {
     pub rect: RectI,
     pub axis: Axis,

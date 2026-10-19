@@ -19,12 +19,16 @@ pub struct Joint {
 /// A body part spanning two joints. `pivot` is the end attached to the parent
 /// part and the point the part rotates around; `tip` is the free end.
 /// `parent` is the part it hangs from (None for a root such as the torso).
+/// `limit` is the allowed rotation range `[min, max]` in radians relative to
+/// the parent (0 = as drawn); None means it can turn freely.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SkelPart {
     pub name: String,
     pub pivot: usize,
     pub tip: usize,
     pub parent: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<[f32; 2]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -40,32 +44,48 @@ impl Skeleton {
     pub fn person_front(bbox: RectI) -> Skeleton {
         let at = |u: f32, v: f32| [bbox.x as f32 + u * bbox.w as f32, bbox.y as f32 + v * bbox.h as f32];
         let joints = [
-            ("head top", at(0.5, 0.03)),
-            ("neck", at(0.5, 0.24)),
-            ("pelvis", at(0.5, 0.62)),
-            ("left shoulder", at(0.36, 0.30)),
-            ("left hand", at(0.12, 0.56)),
-            ("right shoulder", at(0.64, 0.30)),
-            ("right hand", at(0.88, 0.56)),
-            ("left hip", at(0.42, 0.66)),
-            ("left foot", at(0.38, 0.97)),
-            ("right hip", at(0.58, 0.66)),
-            ("right foot", at(0.62, 0.97)),
+            ("head top", at(0.5, 0.03)),      // 0
+            ("neck", at(0.5, 0.24)),          // 1
+            ("pelvis", at(0.5, 0.62)),        // 2
+            ("left shoulder", at(0.36, 0.30)), // 3
+            ("left elbow", at(0.24, 0.43)),   // 4
+            ("left hand", at(0.12, 0.56)),    // 5
+            ("right shoulder", at(0.64, 0.30)), // 6
+            ("right elbow", at(0.76, 0.43)),  // 7
+            ("right hand", at(0.88, 0.56)),   // 8
+            ("left hip", at(0.42, 0.66)),     // 9
+            ("left knee", at(0.40, 0.815)),   // 10
+            ("left foot", at(0.38, 0.97)),    // 11
+            ("right hip", at(0.58, 0.66)),    // 12
+            ("right knee", at(0.60, 0.815)),  // 13
+            ("right foot", at(0.62, 0.97)),   // 14
         ];
-        // (name, pivot, tip, parent part); the torso is the root.
+        // (name, pivot, tip, parent part, rotation limit in degrees). The torso
+        // is the root; a forearm's pivot is its upper arm's tip (the elbow),
+        // which is what lets IK move the two together.
         let parts = [
-            ("head", 1, 0, Some(1)),
-            ("torso", 2, 1, None),
-            ("left arm", 3, 4, Some(1)),
-            ("right arm", 5, 6, Some(1)),
-            ("left leg", 7, 8, Some(1)),
-            ("right leg", 9, 10, Some(1)),
+            ("head", 1, 0, Some(1), Some(40.0_f32)),
+            ("torso", 2, 1, None, Some(60.0)),
+            ("left upper arm", 3, 4, Some(1), None),
+            ("left forearm", 4, 5, Some(2), Some(150.0)),
+            ("right upper arm", 6, 7, Some(1), None),
+            ("right forearm", 7, 8, Some(4), Some(150.0)),
+            ("left thigh", 9, 10, Some(1), None),
+            ("left shin", 10, 11, Some(6), Some(150.0)),
+            ("right thigh", 12, 13, Some(1), None),
+            ("right shin", 13, 14, Some(8), Some(150.0)),
         ];
         Skeleton {
             joints: joints.iter().map(|&(n, pos)| Joint { name: n.into(), pos }).collect(),
             parts: parts
                 .iter()
-                .map(|&(n, pivot, tip, parent)| SkelPart { name: n.into(), pivot, tip, parent })
+                .map(|&(n, pivot, tip, parent, limit)| SkelPart {
+                    name: n.into(),
+                    pivot,
+                    tip,
+                    parent,
+                    limit: limit.map(|d| [-d.to_radians(), d.to_radians()]),
+                })
                 .collect(),
         }
     }
@@ -92,7 +112,7 @@ impl Skeleton {
     pub fn add_part(&mut self, pivot: usize, tip: usize) -> usize {
         let name = unique_name("bone", self.parts.iter().map(|p| p.name.as_str()));
         let parent = self.guess_parent(pivot);
-        self.parts.push(SkelPart { name, pivot, tip, parent });
+        self.parts.push(SkelPart { name, pivot, tip, parent, limit: None });
         self.parts.len() - 1
     }
 
@@ -377,8 +397,8 @@ mod tests {
         let skel = Skeleton {
             joints: vec![j("pelvis", 60.0, 95.0), j("neck", 60.0, 22.0), j("shoulder", 42.0, 26.0), j("hand", 6.0, 26.0)],
             parts: vec![
-                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None },
-                SkelPart { name: "arm".into(), pivot: 2, tip: 3, parent: Some(0) },
+                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None },
+                SkelPart { name: "arm".into(), pivot: 2, tip: 3, parent: Some(0), limit: None },
             ],
         };
         (fg, skel)
@@ -446,8 +466,8 @@ mod tests {
         let skel = Skeleton {
             joints: vec![j("pelvis", 60.0, 175.0), j("neck", 60.0, 90.0), j("head top", 60.0, 12.0)],
             parts: vec![
-                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None },
-                SkelPart { name: "head".into(), pivot: 1, tip: 2, parent: Some(0) },
+                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None },
+                SkelPart { name: "head".into(), pivot: 1, tip: 2, parent: Some(0), limit: None },
             ],
         };
         let sm = skeleton_masks(&fg, &skel);
@@ -498,7 +518,11 @@ mod tests {
     #[test]
     fn template_fits_bbox() {
         let s = Skeleton::person_front(RectI::new(100, 50, 200, 400));
-        assert_eq!(s.parts.len(), 6);
+        assert_eq!((s.joints.len(), s.parts.len()), (15, 10));
+        let forearm = s.parts.iter().position(|p| p.name == "left forearm").unwrap();
+        let upper = s.parts[forearm].parent.unwrap();
+        assert_eq!(s.parts[upper].name, "left upper arm");
+        assert_eq!(s.parts[forearm].pivot, s.parts[upper].tip, "elbow joint is shared");
         assert_eq!(s.joints[1].pos, [200.0, 146.0]);
     }
 }

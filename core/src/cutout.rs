@@ -6,7 +6,8 @@ use crate::geom::RectI;
 use crate::mask::Mask;
 use image::RgbaImage;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Params {
     /// Max RGB distance from a background color for a pixel to count as background.
     pub threshold: f32,

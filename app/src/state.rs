@@ -1,11 +1,12 @@
 use crate::canvas::{Drag, View};
 use anim_core::{
-    Axis, History, Mask, Params, PartBox, Pose, RectI, Skeleton, Sprite, build_sprites, foreground_mask, part_masks,
-    skeleton_masks, write_parts,
+
+    Axis, History, Mask, Params, PartBox, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, foreground_mask,
+    load_project, part_masks, project, save_project, skeleton_masks, write_parts,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Tint colors for part masks, cycled per part.
 pub const PALETTE: [[u8; 3]; 12] = [
@@ -85,6 +86,13 @@ pub struct Doc {
     pub sprites: Vec<Sprite>,
     pub sprite_tex: Vec<Option<TextureHandle>>,
     pub sprites_dirty: bool,
+    /// The original image file, kept byte for byte so projects store it unchanged.
+    pub image_bytes: Vec<u8>,
+    pub image_ext: String,
+    /// Where this was last saved as a project; None until the first save.
+    pub project_path: Option<PathBuf>,
+    /// Changes since the last save (or since opening).
+    pub dirty: bool,
 }
 
 impl Doc {
@@ -159,8 +167,11 @@ pub struct AppState {
     pub drag_pointer: Option<egui::Pos2>,
     /// State before the current drag, recorded for undo when the drag ends.
     pub drag_before: Option<Snapshot>,
-    /// State before a name edit, recorded for undo when the text box loses focus.
-    pub rename_before: Option<Snapshot>,
+    /// State before a typed or dragged field edit (a name, a limit), recorded
+    /// as one undo step when the field is let go.
+    pub field_before: Option<Snapshot>,
+    /// Pose mode: dragging a hand or foot moves the whole limb.
+    pub ik: bool,
     /// Selected box (boxes mode).
     pub selected: Option<usize>,
     /// Selected joint or bone (joints mode).
@@ -191,7 +202,8 @@ impl Default for AppState {
             drag: Drag::None,
             drag_pointer: None,
             drag_before: None,
-            rename_before: None,
+            field_before: None,
+            ik: true,
             selected: None,
             skel_sel: SkelSel::None,
             show_fg: false,
@@ -208,12 +220,59 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Open an image or a `.pm2d` project, chosen by the file extension.
     pub fn open(&mut self, ctx: &egui::Context, path: &Path) {
-        let image = match image::open(path) {
-            Ok(img) => img.to_rgba8(),
+        let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+        if ext == project::EXTENSION {
+            self.open_project(ctx, path);
+        } else {
+            self.open_image(ctx, path);
+        }
+    }
+
+    fn open_image(&mut self, ctx: &egui::Context, path: &Path) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
             Err(e) => {
                 self.status = format!("Could not open {}: {e}", path.display());
                 return;
+            }
+        };
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+        let Some(mut doc) = self.load_doc(ctx, &name, bytes, ext) else { return };
+        doc.fit_skeleton();
+        self.set_doc(doc);
+    }
+
+    fn open_project(&mut self, ctx: &egui::Context, path: &Path) {
+        let loaded = match load_project(path) {
+            Ok(l) => l,
+            Err(e) => {
+                self.status = format!("Could not open {}: {e}", path.display());
+                return;
+            }
+        };
+        let data = loaded.data;
+        // Settings first: the figure is found using the project's own cutout settings.
+        self.params = data.params;
+        self.overlap = data.overlap;
+        let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext) else { return };
+        doc.restore(Snapshot { skeleton: data.skeleton, boxes: data.boxes, pose: data.pose });
+        doc.recompute_skeleton();
+        doc.recompute_parts(&self.params, self.resolve_overlaps);
+        doc.project_path = Some(path.to_path_buf());
+        self.status = format!("Opened project {}", path.file_name().unwrap_or_default().to_string_lossy());
+        self.set_doc(doc);
+    }
+
+    /// Decode an image and build a fresh document for it (empty skeleton).
+    fn load_doc(&mut self, ctx: &egui::Context, name: &str, bytes: Vec<u8>, ext: String) -> Option<Doc> {
+        let image = match image::load_from_memory(&bytes) {
+            Ok(img) => img.to_rgba8(),
+            Err(e) => {
+                self.status = format!("Could not read the image {name}: {e}");
+                return None;
             }
         };
         let max_side = ctx.input(|i| i.max_texture_side) as u32;
@@ -223,45 +282,112 @@ impl AppState {
                 image.width(),
                 image.height()
             );
-            return;
+            return None;
         }
         let texture = ctx.load_texture("drawing", to_color_image(&image), TextureOptions::LINEAR);
         let t = std::time::Instant::now();
         let fg = foreground_mask(&image, &self.params);
-        self.status = format!(
-            "{} — {}×{}, foreground in {} ms",
-            path.file_name().unwrap_or_default().to_string_lossy(),
-            image.width(),
-            image.height(),
-            t.elapsed().as_millis()
-        );
+        self.status = format!("{name} — {}×{}, foreground in {} ms", image.width(), image.height(), t.elapsed().as_millis());
         let overlap = Mask::new(image.width(), image.height());
-        let mut doc = Doc {
+        let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        Some(Doc {
             image,
             texture,
             fg,
             boxes: Vec::new(),
             overlap,
-            skeleton: Skeleton { joints: Vec::new(), parts: Vec::new() },
+            skeleton: Skeleton::empty(),
             skel_masks: Vec::new(),
             skel_radii: Vec::new(),
             overlay: None,
             overlay_dirty: true,
             history: History::new(UNDO_LIMIT),
-            name: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+            name: stem,
             pose: Pose::default(),
             sprites: Vec::new(),
             sprite_tex: Vec::new(),
             sprites_dirty: true,
-        };
-        doc.fit_skeleton();
+            image_bytes: bytes,
+            image_ext: ext,
+            project_path: None,
+            dirty: false,
+        })
+    }
+
+    fn set_doc(&mut self, doc: Doc) {
         self.doc = Some(doc);
         self.selected = None;
         self.skel_sel = SkelSel::None;
         self.drag = Drag::None;
         self.drag_before = None;
-        self.rename_before = None;
+        self.field_before = None;
         self.fit_pending = true;
+    }
+
+    /// Save to the current project file, or ask where if it has none yet.
+    pub fn save(&mut self) {
+        match self.doc.as_ref().and_then(|d| d.project_path.clone()) {
+            Some(path) => self.save_to(&path),
+            None => self.save_as(),
+        }
+    }
+
+    pub fn save_as(&mut self) {
+        let Some(doc) = &self.doc else { return };
+        let Some(mut path) = rfd::FileDialog::new()
+            .set_title("Save project")
+            .add_filter("PuppetMotion project", &[project::EXTENSION])
+            .set_file_name(format!("{}.{}", doc.name, project::EXTENSION))
+            .save_file()
+        else {
+            return;
+        };
+        if path.extension().is_none_or(|e| e != project::EXTENSION) {
+            path.set_extension(project::EXTENSION);
+        }
+        self.save_to(&path);
+    }
+
+    pub fn save_to(&mut self, path: &Path) {
+        let Some(doc) = &mut self.doc else { return };
+        let data = ProjectData {
+            format_version: project::FORMAT_VERSION,
+            image_name: format!("{}.{}", doc.name, doc.image_ext),
+            params: self.params,
+            skeleton: doc.skeleton.clone(),
+            pose: doc.pose.clone(),
+            boxes: doc.boxes.iter().map(|b| b.part).collect(),
+            overlap: self.overlap,
+        };
+        self.status = match save_project(path, &data, &doc.image_bytes, &doc.image_ext) {
+            Ok(()) => {
+                doc.project_path = Some(path.to_path_buf());
+                doc.dirty = false;
+                format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy())
+            }
+            Err(e) => format!("Save failed: {e}"),
+        };
+    }
+
+    pub fn open_dialog(&mut self, ctx: &egui::Context) {
+        let images = ["png", "jpg", "jpeg", "webp", "bmp", "gif"];
+        let all: Vec<&str> = images.iter().copied().chain([project::EXTENSION]).collect();
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images and projects", &all)
+            .add_filter("PuppetMotion project", &[project::EXTENSION])
+            .add_filter("Images", &images)
+            .pick_file()
+        {
+            self.open(ctx, &path);
+        }
+    }
+
+    /// Window title: app name, drawing name, and a * when there are unsaved changes.
+    pub fn title(&self) -> String {
+        match &self.doc {
+            Some(d) => format!("PuppetMotion 2D — {}{}", d.name, if d.dirty { " *" } else { "" }),
+            None => "PuppetMotion 2D".into(),
+        }
     }
 
     pub fn recompute_parts(&mut self) {
@@ -278,6 +404,9 @@ impl AppState {
     pub fn commit(&mut self, before: Option<Snapshot>) {
         if let (Some(doc), Some(before)) = (&mut self.doc, before) {
             let after = doc.snapshot();
+            if before != after {
+                doc.dirty = true;
+            }
             doc.history.record(before, &after);
         }
     }
@@ -285,6 +414,7 @@ impl AppState {
     /// Put back a snapshot and recompute everything derived from it.
     pub fn restore(&mut self, s: Snapshot) {
         if let Some(doc) = &mut self.doc {
+            doc.dirty = true;
             doc.restore(s);
             doc.recompute_skeleton();
         }
@@ -428,12 +558,20 @@ impl AppState {
 
     pub fn side_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Animator");
-        if ui.button("Open…").clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "gif"])
-                .pick_file()
-        {
-            self.open(ui.ctx(), &path);
+        ui.horizontal(|ui| {
+            if ui.button("Open…").on_hover_text("An image or a project (Ctrl+O)").clicked() {
+                self.open_dialog(ui.ctx());
+            }
+            let has_doc = self.doc.is_some();
+            if ui.add_enabled(has_doc, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked() {
+                self.save();
+            }
+            if ui.add_enabled(has_doc, egui::Button::new("Save As…")).clicked() {
+                self.save_as();
+            }
+        });
+        if self.doc.as_ref().is_some_and(|d| d.dirty) {
+            ui.label(egui::RichText::new("● unsaved changes").color(Color32::from_rgb(255, 190, 40)));
         }
         ui.label(&self.status);
         if let Some(doc) = &self.doc {
@@ -478,6 +616,7 @@ impl AppState {
             && let Some(doc) = &mut self.doc
         {
             doc.fg = foreground_mask(&doc.image, &self.params);
+            doc.dirty = true;
             doc.recompute_skeleton();
             self.recompute_parts();
         }
@@ -529,14 +668,17 @@ impl AppState {
             && let Some(doc) = &mut self.doc
         {
             doc.sprites_dirty = true;
+            doc.dirty = true;
         }
+        ui.checkbox(&mut self.ik, "IK: drag a hand or foot to move the whole limb");
         ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
         if ui.button("Export parts…").on_hover_text("One PNG per part plus rig.json").clicked() {
             self.export_parts(ui.ctx());
         }
         ui.separator();
         ui.small(
-            "Drag a bone's end dot: rotate that part (children follow)\n\
+            "Drag a hand or foot: the whole limb follows (IK)\n\
+             Drag any other bone end: rotate that part (children follow)\n\
              Drag the root's start dot: move the whole figure\n\
              Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
              Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
@@ -599,14 +741,15 @@ impl AppState {
             let resp = resp.inner;
             // One undo step per rename: from gaining focus to losing it.
             if resp.gained_focus() {
-                self.rename_before = before;
+                self.field_before = before;
             }
             if resp.lost_focus() {
-                let before = self.rename_before.take();
+                let before = self.field_before.take();
                 self.commit(before);
             }
             if let SkelSel::Part(p) = sel {
                 self.parent_picker(ui, p);
+                self.limit_editor(ui, p);
             }
             let delete = if matches!(sel, SkelSel::Joint(_)) { "Delete joint and its bones" } else { "Delete bone" };
             if ui.button(delete).clicked() {
@@ -623,6 +766,46 @@ impl AppState {
              Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
              Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
         );
+    }
+
+    /// Rotation limit for bone `p`: on/off plus min/max in degrees. A whole
+    /// drag of a value (or one typed edit) is a single undo step.
+    fn limit_editor(&mut self, ui: &mut egui::Ui, p: usize) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        let limit = doc.skeleton.parts[p].limit;
+        let mut on = limit.is_some();
+        let [mut lo, mut hi] = limit.map_or([-90.0, 90.0], |[a, b]| [a.to_degrees(), b.to_degrees()]);
+        let mut started = false;
+        let mut finished = false;
+        ui.horizontal(|ui| {
+            let r = ui.checkbox(&mut on, "Limit rotation");
+            finished |= r.changed();
+            started |= r.changed();
+            if on {
+                for (value, range) in [(&mut lo, -180.0..=0.0), (&mut hi, 0.0..=180.0)] {
+                    let r = ui.add(egui::DragValue::new(value).range(range).suffix("°").speed(1.0));
+                    started |= r.drag_started() || r.gained_focus();
+                    finished |= r.drag_stopped() || r.lost_focus();
+                }
+            }
+        })
+        .response
+        .on_hover_text("How far this bone can turn from the way it's drawn (relative to the bone it hangs from)");
+        let new = on.then(|| [lo.to_radians(), hi.to_radians()]);
+        if new != limit {
+            doc.skeleton.parts[p].limit = new;
+            // Keep the current pose inside the new range.
+            let a = doc.pose.angle(p);
+            doc.pose.set_angle(p, anim_core::clamp_to_limit(&doc.skeleton, p, a));
+        }
+        if started && self.field_before.is_none() {
+            self.field_before = before;
+        }
+        if finished {
+            let before = self.field_before.take();
+            self.commit(before);
+        }
     }
 
     /// "Attached to" dropdown: which part bone `p` hangs from. Its own
@@ -729,7 +912,7 @@ mod tests {
     #[test]
     fn skeleton_edits_undo_and_redo() {
         let mut state = open_sample();
-        assert_eq!(bone_count(&state), 6, "starts with the person template");
+        assert_eq!(bone_count(&state), 10, "starts with the person template");
         assert!(!state.doc.as_ref().unwrap().history.can_undo());
 
         // Grow a tail from the pelvis (joint 2), then delete the head bone.
@@ -739,18 +922,18 @@ mod tests {
         });
         state.skel_sel = SkelSel::Part(0);
         state.delete_skel_selection();
-        assert_eq!(bone_count(&state), 6);
-        assert_eq!(state.doc.as_ref().unwrap().skel_masks.len(), 6, "masks follow the skeleton");
+        assert_eq!(bone_count(&state), 10);
+        assert_eq!(state.doc.as_ref().unwrap().skel_masks.len(), 10, "masks follow the skeleton");
 
         state.undo();
-        assert_eq!(bone_count(&state), 7, "head is back");
+        assert_eq!(bone_count(&state), 11, "head is back");
         state.undo();
-        assert_eq!(bone_count(&state), 6, "tail is gone");
+        assert_eq!(bone_count(&state), 10, "tail is gone");
         assert!(!state.doc.as_ref().unwrap().history.can_undo());
 
         state.redo();
         state.redo();
-        assert_eq!(bone_count(&state), 6);
+        assert_eq!(bone_count(&state), 10);
         let names: Vec<_> = state.doc.as_ref().unwrap().skeleton.parts.iter().map(|p| p.name.clone()).collect();
         assert!(!names.contains(&"head".to_string()) && names.contains(&"bone 1".to_string()));
     }
@@ -761,8 +944,10 @@ mod tests {
         let ctx = egui::Context::default();
         state.refresh_sprites(&ctx);
         let doc = state.doc.as_ref().unwrap();
-        assert_eq!(doc.sprites.len(), 6);
-        assert!(doc.sprite_tex.iter().all(Option::is_some), "every template part has pixels");
+        assert_eq!(doc.sprites.len(), 10);
+        // The auto-placed template misses the raised right arm (its forearm
+        // points where nothing is drawn), so not every part gets pixels.
+        assert!(doc.sprite_tex.iter().filter(|t| t.is_some()).count() >= 8);
 
         // Pose the left arm as one undoable step (what a drag does).
         let before = state.snapshot();
@@ -777,8 +962,41 @@ mod tests {
         state.edit_skeleton(|s| s.remove_part(0));
         assert!(state.doc.as_ref().unwrap().pose.angles.iter().all(|&a| a == 0.0));
         state.undo();
-        assert_eq!(bone_count(&state), 6);
+        assert_eq!(bone_count(&state), 10);
         assert_eq!(state.doc.as_ref().unwrap().pose.angle(2), 1.0);
+    }
+
+    #[test]
+    fn save_and_reopen_project() {
+        let mut state = open_sample();
+        assert!(!state.doc.as_ref().unwrap().dirty, "freshly opened image is clean");
+
+        // Pose, tweak a setting and a limit, then save.
+        let before = state.snapshot();
+        let doc = state.doc.as_mut().unwrap();
+        doc.pose.set_angle(3, 0.8);
+        doc.skeleton.parts[3].limit = Some([-0.5, 1.2]);
+        state.commit(before);
+        assert!(state.doc.as_ref().unwrap().dirty, "an edit marks it unsaved");
+        state.params.gap_close = 5;
+        state.overlap = 0.6;
+        let path = std::env::temp_dir().join(format!("pm2d_app_test_{}.pm2d", std::process::id()));
+        state.save_to(&path);
+        assert!(!state.doc.as_ref().unwrap().dirty, "{}", state.status);
+
+        // Reopen in a fresh app.
+        let ctx = egui::Context::default();
+        let mut fresh = AppState::default();
+        fresh.open(&ctx, &path);
+        let (a, b) = (state.doc.as_ref().unwrap(), fresh.doc.as_ref().expect(&fresh.status));
+        assert_eq!(b.skeleton, a.skeleton);
+        assert_eq!(b.pose, a.pose);
+        assert_eq!(b.image_bytes, a.image_bytes, "image stored byte for byte");
+        assert_eq!(fresh.params.gap_close, 5);
+        assert_eq!(fresh.overlap, 0.6);
+        assert_eq!(b.skel_masks.len(), 10, "masks recomputed on open");
+        assert!(!b.dirty && b.project_path.as_deref() == Some(path.as_path()));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
