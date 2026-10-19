@@ -7,6 +7,7 @@
 
 use crate::cutout::Params;
 use crate::parts::PartBox;
+use crate::motion::Motion;
 use crate::rig::Pose;
 use crate::skeleton::Skeleton;
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,9 @@ pub struct ProjectData {
     /// Joint overlap (disc size) used for the cut-out parts.
     #[serde(default = "default_overlap")]
     pub overlap: f32,
+    /// Keyed animation (empty in projects saved before motion existed).
+    #[serde(default)]
+    pub motion: Motion,
 }
 
 fn default_overlap() -> f32 {
@@ -119,6 +123,11 @@ mod tests {
             pose,
             boxes: vec![PartBox { rect: RectI::new(1, 2, 3, 4), axis: crate::parts::Axis::DiagUp }],
             overlap: 0.5,
+            motion: {
+                let mut m = Motion::default();
+                m.offset_x.push(crate::motion::Key { t: 0.5, value: 2.0, ease: crate::motion::Ease::Hold });
+                m
+            },
         }
     }
 
@@ -160,6 +169,7 @@ mod tests {
         assert_eq!(data.skeleton.parts[0].limit, None);
         assert_eq!(data.params, Params::default());
         assert_eq!(data.overlap, 1.0);
+        assert!(data.motion.is_empty(), "no motion in an older project");
     }
 
     #[test]

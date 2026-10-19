@@ -6,6 +6,7 @@ pub mod cutout;
 pub mod geom;
 pub mod history;
 pub mod mask;
+pub mod motion;
 pub mod parts;
 pub mod project;
 pub mod rig;
@@ -16,6 +17,7 @@ pub use cutout::{Params, foreground_mask, part_mask};
 pub use geom::RectI;
 pub use history::History;
 pub use mask::Mask;
+pub use motion::{Clip, Ease, Key, KeyRef, Motion, TrackId};
 pub use parts::{Axis, PartBox, PartMasks, part_masks};
 pub use project::{LoadedProject, ProjectData, load_project, save_project};
 pub use rig::{

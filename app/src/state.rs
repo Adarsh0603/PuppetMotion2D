@@ -1,7 +1,7 @@
 use crate::canvas::{Drag, View};
 use anim_core::{
 
-    Axis, History, Mask, Params, PartBox, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, foreground_mask,
+    Axis, Clip, History, KeyRef, Mask, Motion, Params, PartBox, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, foreground_mask,
     load_project, part_masks, project, save_project, skeleton_masks, write_parts,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -55,6 +55,7 @@ pub struct Snapshot {
     pub skeleton: Skeleton,
     pub boxes: Vec<PartBox>,
     pub pose: Pose,
+    pub motion: Motion,
 }
 
 pub struct BoxItem {
@@ -81,6 +82,8 @@ pub struct Doc {
     /// File name without extension, used to name exported parts.
     pub name: String,
     pub pose: Pose,
+    /// Keyed animation. In Pose mode the shown pose is sampled from it at the playhead.
+    pub motion: Motion,
     /// Cut-out parts and their textures (None for an empty part), rebuilt when
     /// `sprites_dirty` is set.
     pub sprites: Vec<Sprite>,
@@ -101,6 +104,7 @@ impl Doc {
             skeleton: self.skeleton.clone(),
             boxes: self.boxes.iter().map(|b| b.part).collect(),
             pose: self.pose.clone(),
+            motion: self.motion.clone(),
         }
     }
 
@@ -109,6 +113,7 @@ impl Doc {
         self.skeleton = s.skeleton;
         self.boxes = s.boxes.into_iter().map(|part| BoxItem { part, mask: Mask::new(0, 0), pixels: 0 }).collect();
         self.pose = s.pose;
+        self.motion = s.motion;
     }
 
     /// Back to the pose as drawn. Needed whenever bones are added or removed,
@@ -172,6 +177,22 @@ pub struct AppState {
     pub field_before: Option<Snapshot>,
     /// Pose mode: dragging a hand or foot moves the whole limb.
     pub ik: bool,
+    /// Current time on the timeline (seconds).
+    pub playhead: f32,
+    pub playing: bool,
+    pub looping: bool,
+    /// Space was used to pan during this press, so releasing it shouldn't toggle playback.
+    pub space_panned: bool,
+    /// Pose drags save keys at the playhead right away (the record button).
+    pub auto_key: bool,
+    /// The shown pose was changed with auto-key off and hasn't been keyed yet.
+    pub unkeyed_pose: bool,
+    /// Playhead time the shown pose was last sampled at (to notice scrubbing).
+    pub sampled_at: f32,
+    /// Keys selected on the timeline (for copy, paste, delete).
+    pub key_sel: Vec<KeyRef>,
+    /// Last copied keys, used if the system clipboard has something else on it.
+    pub clip: Option<Clip>,
     /// Selected box (boxes mode).
     pub selected: Option<usize>,
     /// Selected joint or bone (joints mode).
@@ -187,6 +208,8 @@ pub struct AppState {
     pub overlap: f32,
     /// Pose mode: show the original drawing faintly behind the posed parts.
     pub show_ghost: bool,
+    /// Pose mode: draw bones and joint dots over the parts (B toggles).
+    pub show_bones: bool,
     pub status: String,
     /// Set when a new image is loaded so the canvas fits it on the next frame.
     pub fit_pending: bool,
@@ -204,6 +227,15 @@ impl Default for AppState {
             drag_before: None,
             field_before: None,
             ik: true,
+            playhead: 0.0,
+            playing: false,
+            looping: true,
+            space_panned: false,
+            auto_key: false,
+            unkeyed_pose: false,
+            sampled_at: 0.0,
+            key_sel: Vec::new(),
+            clip: None,
             selected: None,
             skel_sel: SkelSel::None,
             show_fg: false,
@@ -213,6 +245,7 @@ impl Default for AppState {
             show_capsules: false,
             overlap: 1.0,
             show_ghost: false,
+            show_bones: true,
             status: "Open or drop an image to start.".into(),
             fit_pending: false,
         }
@@ -258,7 +291,7 @@ impl AppState {
         self.params = data.params;
         self.overlap = data.overlap;
         let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext) else { return };
-        doc.restore(Snapshot { skeleton: data.skeleton, boxes: data.boxes, pose: data.pose });
+        doc.restore(Snapshot { skeleton: data.skeleton, boxes: data.boxes, pose: data.pose, motion: data.motion });
         doc.recompute_skeleton();
         doc.recompute_parts(&self.params, self.resolve_overlaps);
         doc.project_path = Some(path.to_path_buf());
@@ -304,6 +337,7 @@ impl AppState {
             history: History::new(UNDO_LIMIT),
             name: stem,
             pose: Pose::default(),
+            motion: Motion::default(),
             sprites: Vec::new(),
             sprite_tex: Vec::new(),
             sprites_dirty: true,
@@ -314,7 +348,138 @@ impl AppState {
         })
     }
 
+    /// Advance playback by this frame's time and keep the shown pose in step
+    /// with the motion. Call once per frame.
+    pub fn tick(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &mut self.doc else { return };
+        if self.playing {
+            self.playhead += ctx.input(|i| i.stable_dt).min(0.1);
+            let end = doc.motion.duration.max(0.01);
+            if self.playhead >= end {
+                if self.looping {
+                    self.playhead %= end;
+                } else {
+                    self.playhead = end;
+                    self.playing = false;
+                }
+            }
+            ctx.request_repaint();
+        }
+        // A pose made with auto-key off stays on screen until the playhead
+        // moves or playback runs; then the motion takes over again.
+        if self.playing || (self.playhead - self.sampled_at).abs() > 1e-6 {
+            self.unkeyed_pose = false;
+        }
+        // While a pose drag is in progress the dragged pose wins; otherwise
+        // show the motion at the playhead (if there is one).
+        let posing = matches!(self.drag, Drag::PoseRotate { .. } | Drag::PoseMove);
+        if self.mode == Mode::Pose && !posing && !self.unkeyed_pose && !doc.motion.is_empty() {
+            doc.pose = doc.motion.sample(self.playhead, &doc.skeleton);
+        }
+        self.sampled_at = self.playhead;
+    }
+
+    /// Save the current pose at the playhead: keys for the parts that differ
+    /// from what the motion already has there (all changed parts if there is
+    /// no motion yet). Bound to K and the "Key pose" button.
+    pub fn key_pose(&mut self) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        let current = doc.motion.sample(self.playhead, &doc.skeleton);
+        doc.motion.set_keys(self.playhead, &doc.skeleton, &doc.pose, Some(&current));
+        let changed = before.as_ref().is_none_or(|b| b.motion != doc.motion);
+        self.status = if changed {
+            format!("Keyed pose at {:.2} s", self.playhead)
+        } else {
+            "Nothing to key: the pose already matches the motion here".into()
+        };
+        self.unkeyed_pose = false;
+        self.commit(before);
+    }
+
+    pub fn toggle_play(&mut self) {
+        let Some(doc) = &self.doc else { return };
+        if !self.playing && !self.looping && self.playhead >= doc.motion.duration {
+            self.playhead = 0.0;
+        }
+        self.playing = !self.playing;
+    }
+
+    /// Key every part at the playhead, as currently posed.
+    pub fn key_all(&mut self) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        doc.motion.set_keys(self.playhead, &doc.skeleton, &doc.pose, None);
+        self.commit(before);
+    }
+
+    pub fn delete_keys_here(&mut self) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        doc.motion.remove_keys_at(self.playhead);
+        self.commit(before);
+    }
+
+    /// Copy the selected keys, to the app and to the system clipboard (as
+    /// text, so they can be pasted into another project too).
+    pub fn copy_keys(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &self.doc else { return };
+        if self.key_sel.is_empty() {
+            return;
+        }
+        let clip = doc.motion.copy(&self.key_sel);
+        ctx.copy_text(clip.to_clipboard_text());
+        self.status = format!("Copied {} keys", clip.keys.len());
+        self.clip = Some(clip);
+    }
+
+    /// Paste keys at the playhead: `text` from the system clipboard if it holds
+    /// copied keys, else the last keys copied in this app. The pasted keys
+    /// become the selection.
+    pub fn paste_keys(&mut self, text: Option<&str>) {
+        let Some(clip) = text.and_then(Clip::from_clipboard_text).or_else(|| self.clip.clone()) else { return };
+        if clip.is_empty() {
+            return;
+        }
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        self.key_sel = doc.motion.paste(&clip, self.playhead);
+        self.status = format!("Pasted {} keys at {:.2} s", clip.keys.len(), self.playhead);
+        self.commit(before);
+    }
+
+    pub fn delete_selected_keys(&mut self) {
+        if self.key_sel.is_empty() {
+            return;
+        }
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        doc.motion.remove(&self.key_sel);
+        self.key_sel.clear();
+        self.commit(before);
+    }
+
+    /// Move the playhead to the previous (`dir < 0`) or next key.
+    pub fn jump_key(&mut self, dir: i32) {
+        let Some(doc) = &self.doc else { return };
+        let times = doc.motion.key_times();
+        let eps = anim_core::motion::KEY_EPSILON;
+        let target = if dir < 0 {
+            times.iter().rev().find(|&&t| t < self.playhead - eps)
+        } else {
+            times.iter().find(|&&t| t > self.playhead + eps)
+        };
+        if let Some(&t) = target {
+            self.playhead = t;
+            self.playing = false;
+        }
+    }
+
     fn set_doc(&mut self, doc: Doc) {
+        self.playhead = 0.0;
+        self.unkeyed_pose = false;
+        self.key_sel.clear();
+        self.playing = false;
         self.doc = Some(doc);
         self.selected = None;
         self.skel_sel = SkelSel::None;
@@ -358,6 +523,7 @@ impl AppState {
             pose: doc.pose.clone(),
             boxes: doc.boxes.iter().map(|b| b.part).collect(),
             overlap: self.overlap,
+            motion: doc.motion.clone(),
         };
         self.status = match save_project(path, &data, &doc.image_bytes, &doc.image_ext) {
             Ok(()) => {
@@ -403,6 +569,15 @@ impl AppState {
     /// Record a finished edit for undo. `before` is the state it started from.
     pub fn commit(&mut self, before: Option<Snapshot>) {
         if let (Some(doc), Some(before)) = (&mut self.doc, before) {
+            // A bone's keys are stored under its name, so they follow a finished rename.
+            let (old, new) = (&before.skeleton.parts, &doc.skeleton.parts);
+            if old.len() == new.len() {
+                for (o, n) in old.iter().zip(new) {
+                    if o.name != n.name && !doc.motion.tracks.contains_key(&n.name) {
+                        doc.motion.rename_track(&o.name, &n.name);
+                    }
+                }
+            }
             let after = doc.snapshot();
             if before != after {
                 doc.dirty = true;
@@ -444,6 +619,7 @@ impl AppState {
         if self.selected.is_some_and(|i| i >= doc.boxes.len()) {
             self.selected = None;
         }
+        self.key_sel.retain(|r| doc.motion.has_key(r));
         let valid = match self.skel_sel {
             SkelSel::None => true,
             SkelSel::Joint(j) => j < doc.skeleton.joints.len(),
@@ -654,9 +830,10 @@ impl AppState {
         if self.doc.is_none() {
             return;
         }
-        if ui.button("Reset pose").clicked() {
+        if ui.button("Reset pose").on_hover_text("Back to as drawn (with keys: removes the keys at the playhead)").clicked() {
             let before = self.snapshot();
             if let Some(doc) = &mut self.doc {
+                doc.motion.remove_keys_at(self.playhead);
                 doc.reset_pose();
             }
             self.commit(before);
@@ -671,6 +848,7 @@ impl AppState {
             doc.dirty = true;
         }
         ui.checkbox(&mut self.ik, "IK: drag a hand or foot to move the whole limb");
+        ui.checkbox(&mut self.show_bones, "Show bones").on_hover_text("B: hide them to watch just the animation");
         ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
         if ui.button("Export parts…").on_hover_text("One PNG per part plus rig.json").clicked() {
             self.export_parts(ui.ctx());
@@ -680,6 +858,7 @@ impl AppState {
             "Drag a hand or foot: the whole limb follows (IK)\n\
              Drag any other bone end: rotate that part (children follow)\n\
              Drag the root's start dot: move the whole figure\n\
+             B: show/hide bones   Space: play/pause   K: key pose\n\
              Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
              Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
         );
@@ -997,6 +1176,139 @@ mod tests {
         assert_eq!(b.skel_masks.len(), 10, "masks recomputed on open");
         assert!(!b.dirty && b.project_path.as_deref() == Some(path.as_path()));
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn posing_auto_keys_and_plays_back() {
+        let mut state = open_sample();
+        state.mode = Mode::Pose;
+        state.auto_key = true;
+        let forearm = {
+            let s = &state.doc.as_ref().unwrap().skeleton;
+            s.parts.iter().position(|p| p.name == "left forearm").unwrap()
+        };
+
+        // A pose drag at 1.0 s that moves only the forearm (what canvas does).
+        state.playhead = 1.0;
+        let before = state.snapshot();
+        state.drag = Drag::PoseRotate { part: forearm };
+        state.doc.as_mut().unwrap().pose.set_angle(forearm, 0.9);
+        crate::canvas::key_after_drag(&mut state, before.as_ref());
+        state.drag = Drag::None;
+        state.commit(before);
+        let m = &state.doc.as_ref().unwrap().motion;
+        assert_eq!(m.tracks.keys().collect::<Vec<_>>(), vec!["left forearm"], "only the moved part is keyed");
+        assert_eq!(m.key_times(), vec![1.0]);
+
+        // Playback shows the keyed pose; undo removes the key.
+        let ctx = egui::Context::default();
+        state.playhead = 0.0;
+        state.tick(&ctx);
+        assert_eq!(state.doc.as_ref().unwrap().pose.angle(forearm), 0.9, "held before the only key");
+        state.undo();
+        assert!(state.doc.as_ref().unwrap().motion.is_empty());
+
+        // Looping wraps the playhead.
+        state.redo();
+        state.playhead = state.doc.as_ref().unwrap().motion.duration - 1e-4;
+        state.playing = true;
+        state.tick(&ctx);
+        assert!(state.playhead < 1.0, "wrapped to the start, at {}", state.playhead);
+
+        // Saved with the project.
+        let path = std::env::temp_dir().join(format!("pm2d_motion_test_{}.pm2d", std::process::id()));
+        state.save_to(&path);
+        let mut fresh = AppState::default();
+        fresh.open(&ctx, &path);
+        assert_eq!(fresh.doc.as_ref().unwrap().motion, state.doc.as_ref().unwrap().motion);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn auto_key_off_previews_until_keyed() {
+        let mut state = open_sample();
+        let ctx = egui::Context::default();
+        state.mode = Mode::Pose;
+        assert!(!state.auto_key, "off by default");
+        let head = 0;
+
+        // Some motion exists, so the shown pose normally comes from it.
+        state.playhead = 0.0;
+        state.key_all();
+        state.playhead = 1.0;
+        state.tick(&ctx);
+
+        // A pose drag with auto-key off: nothing recorded, pose stays on screen.
+        let before = state.snapshot();
+        state.drag = Drag::PoseRotate { part: head };
+        state.doc.as_mut().unwrap().pose.set_angle(head, 0.5);
+        crate::canvas::key_after_drag(&mut state, before.as_ref());
+        state.drag = Drag::None;
+        state.commit(before);
+        assert!(state.unkeyed_pose);
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.0]);
+        state.tick(&ctx);
+        assert_eq!(state.doc.as_ref().unwrap().pose.angle(head), 0.5, "preview survives a frame");
+
+        // K keys it: only the changed part, at the playhead.
+        state.key_pose();
+        let m = &state.doc.as_ref().unwrap().motion;
+        assert_eq!(m.key_times(), vec![0.0, 1.0]);
+        assert_eq!(m.keys_at(1.0).len(), 1);
+        assert!(!state.unkeyed_pose);
+
+        // An unkeyed change is dropped when the playhead moves.
+        state.doc.as_mut().unwrap().pose.set_angle(head, -0.3);
+        state.unkeyed_pose = true;
+        state.playhead = 0.0;
+        state.tick(&ctx);
+        assert!(!state.unkeyed_pose);
+        assert_eq!(state.doc.as_ref().unwrap().pose.angle(head), 0.0, "back to the motion");
+    }
+
+    #[test]
+    fn copy_paste_delete_selected_keys() {
+        let mut state = open_sample();
+        let ctx = egui::Context::default();
+        state.playhead = 0.5;
+        state.key_all();
+        let n = state.doc.as_ref().unwrap().motion.keys_at(0.5).len();
+
+        // Select everything at 0.5, copy, paste at 2.0.
+        state.key_sel = state.doc.as_ref().unwrap().motion.keys_at(0.5);
+        state.copy_keys(&ctx);
+        let text = state.clip.as_ref().unwrap().to_clipboard_text();
+        state.playhead = 2.0;
+        state.paste_keys(Some(&text));
+        let m = &state.doc.as_ref().unwrap().motion;
+        assert_eq!(m.key_times(), vec![0.5, 2.0]);
+        assert_eq!(state.key_sel.len(), n, "pasted keys become the selection");
+
+        // Plain text on the clipboard falls back to the app's own copy.
+        state.playhead = 2.5;
+        state.paste_keys(Some("not keys"));
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.5, 2.0, 2.5]);
+
+        // Delete the selection (the 2.5 keys), then undo it.
+        state.delete_selected_keys();
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.5, 2.0]);
+        assert!(state.key_sel.is_empty());
+        state.undo();
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.5, 2.0, 2.5]);
+    }
+
+    #[test]
+    fn finished_rename_moves_the_track() {
+        let mut state = open_sample();
+        let before = state.snapshot();
+        let doc = state.doc.as_mut().unwrap();
+        let mut pose = doc.pose.clone();
+        pose.set_angle(0, 0.3);
+        doc.motion.set_keys(0.5, &doc.skeleton, &pose, None);
+        doc.skeleton.parts[0].name = "big head".into();
+        state.commit(before);
+        let m = &state.doc.as_ref().unwrap().motion;
+        assert!(m.tracks.contains_key("big head") && !m.tracks.contains_key("head"));
     }
 
     #[test]

@@ -199,6 +199,11 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
         painter.add(egui::Shape::mesh(mesh));
     }
 
+    // "Show bones" off (B): just the animation. Dragging still works; the dots are only hidden.
+    if !state.show_bones {
+        return;
+    }
+
     // While rotating a part, show the range its limit allows (and its upper
     // part's, when IK is moving both).
     if let Drag::PoseRotate { part } = state.drag {
@@ -441,6 +446,9 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
         let shift = ui.input(|i| i.modifiers.shift);
         // Snapshot for undo; recorded when the drag ends if anything changed.
         state.drag_before = state.snapshot();
+        if pan && space {
+            state.space_panned = true;
+        }
         state.drag = if pan {
             Drag::Pan
         } else if let (true, Some(o)) = (response.dragged_by(PointerButton::Primary), origin) {
@@ -450,7 +458,11 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
                 Mode::Pose => {
                     let joints = posed_joints(state);
                     let skel = &state.doc.as_ref().unwrap().skeleton;
-                    hit_point(state, canvas, &joints, o).and_then(|j| pose_drag_for_joint(skel, j)).unwrap_or(Drag::None)
+                    let drag = hit_point(state, canvas, &joints, o).and_then(|j| pose_drag_for_joint(skel, j));
+                    if drag.is_some() {
+                        state.playing = false;
+                    }
+                    drag.unwrap_or(Drag::None)
                 }
             }
         } else {
@@ -498,6 +510,7 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
     if response.drag_stopped() {
         finish_drag(state);
         let before = state.drag_before.take();
+        key_after_drag(state, before.as_ref());
         if is_stub_bone(state)
             && let Some(before) = before
         {
@@ -599,5 +612,23 @@ fn finish_drag(state: &mut AppState) {
     };
     if changed {
         state.recompute_parts();
+    }
+}
+
+/// After a pose drag: with auto-key on, save the parts it moved as keys at the
+/// playhead; with it off, just remember that the shown pose isn't keyed yet
+/// (K saves it; scrubbing or playing discards it).
+pub(crate) fn key_after_drag(state: &mut AppState, before: Option<&crate::state::Snapshot>) {
+    if !matches!(state.drag, Drag::PoseRotate { .. } | Drag::PoseMove) {
+        return;
+    }
+    let (Some(doc), Some(before)) = (&mut state.doc, before) else { return };
+    if doc.pose == before.pose {
+        return;
+    }
+    if state.auto_key {
+        doc.motion.set_keys(state.playhead, &doc.skeleton, &doc.pose, Some(&before.pose));
+    } else {
+        state.unkeyed_pose = true;
     }
 }

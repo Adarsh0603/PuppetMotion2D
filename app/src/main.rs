@@ -1,5 +1,6 @@
 mod canvas;
 mod state;
+mod timeline;
 
 use eframe::egui;
 use state::AppState;
@@ -68,6 +69,51 @@ impl App {
         if pressed(ctx, Modifiers::COMMAND, Key::O) {
             self.state.open_dialog(ctx);
         }
+        if self.state.mode == state::Mode::Pose {
+            self.key_shortcuts(ctx);
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::B)) {
+                self.state.show_bones = !self.state.show_bones;
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::K)) {
+                self.state.key_pose();
+            }
+        }
+        // Space plays/pauses in Pose mode, unless it was held to pan (Space+drag).
+        if ctx.input(|i| i.key_released(Key::Space)) {
+            if self.state.mode == state::Mode::Pose && !self.state.space_panned {
+                self.state.toggle_play();
+            }
+            self.state.space_panned = false;
+        }
+    }
+}
+
+impl App {
+    /// Timeline keys in Pose mode: Ctrl+C copies the selected keys, Ctrl+V pastes
+    /// at the playhead, Delete removes them. egui turns Ctrl+C/Ctrl+V into Copy
+    /// and Paste events (Paste carries the system clipboard's text).
+    fn key_shortcuts(&mut self, ctx: &egui::Context) {
+        let (copy, paste, paste_other) = ctx.input(|i| {
+            let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+            let paste = i.events.iter().find_map(|e| match e {
+                egui::Event::Paste(text) => Some(text.clone()),
+                _ => None,
+            });
+            let paste_other = i.events.iter().any(|e| matches!(e, egui::Event::PasteImage(_)));
+            (copy, paste, paste_other)
+        });
+        if copy {
+            self.state.copy_keys(ctx);
+        }
+        if let Some(text) = paste {
+            self.state.paste_keys(Some(&text));
+        } else if paste_other {
+            self.state.paste_keys(None);
+        }
+        let delete = ctx.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+        if delete && !self.state.key_sel.is_empty() {
+            self.state.delete_selected_keys();
+        }
     }
 }
 
@@ -79,10 +125,16 @@ impl eframe::App for App {
             self.state.open(&ctx, &path);
         }
         self.shortcuts(&ctx);
+        self.state.tick(&ctx);
 
         egui::Panel::left("side").resizable(true).default_size(260.0).show(ui, |ui| {
             self.state.side_panel(ui);
         });
+        if self.state.mode == state::Mode::Pose && self.state.doc.is_some() {
+            egui::Panel::bottom("timeline").resizable(true).default_size(160.0).min_size(70.0).max_size(600.0).show(ui, |ui| {
+                timeline::show(ui, &mut self.state);
+            });
+        }
         egui::CentralPanel::default().show(ui, |ui| {
             canvas::show(ui, &mut self.state);
         });
