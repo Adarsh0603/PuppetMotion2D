@@ -228,6 +228,8 @@ pub struct AppState {
     pub template_choice: usize,
     /// Name typed under "Save as template".
     pub template_name: String,
+    /// Side-view templates are placed facing left (mirrored) instead of right.
+    pub facing_left: bool,
     pub status: String,
     /// Set when a new image is loaded so the canvas fits it on the next frame.
     pub fit_pending: bool,
@@ -267,6 +269,7 @@ impl Default for AppState {
             templates: crate::templates::all(),
             template_choice: 0,
             template_name: String::new(),
+            facing_left: false,
             status: "Open or drop a drawing to start.".into(),
             fit_pending: false,
             export: ExportUi::default(),
@@ -297,9 +300,9 @@ impl AppState {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
         let Some(mut doc) = self.load_doc(ctx, &name, bytes, ext) else { return };
-        // Start with the template last used (Person (front) at first).
+        // Start with the template last used (Person (front) at first), facing the same way.
         if let Some(t) = self.templates.get(self.template_choice).or(self.templates.first()) {
-            doc.fit_skeleton(t);
+            doc.fit_skeleton(&self.facing(t));
         }
         self.set_doc(doc);
         // A new drawing starts at Review, so the cutout can be checked first.
@@ -1088,6 +1091,34 @@ impl AppState {
                 self.edit_skeleton(|s| *s = Skeleton::empty());
             }
         });
+        // Side views: which way the character faces, and which limbs are in front.
+        let side_template = self.templates.get(self.template_choice).is_some_and(Template::is_side_view);
+        let has_near_far = self.doc.as_ref().is_some_and(|d| d.skeleton.joints.iter().any(|j| j.name.starts_with("near ")));
+        if side_template || has_near_far {
+            ui.horizontal(|ui| {
+                if side_template {
+                    ui.label("Facing");
+                    let before = self.facing_left;
+                    ui.selectable_value(&mut self.facing_left, false, "Right ▶");
+                    ui.selectable_value(&mut self.facing_left, true, "◀ Left");
+                    if before != self.facing_left {
+                        // Turning the template around re-places it.
+                        self.apply_template(self.template_choice);
+                    }
+                }
+                if has_near_far
+                    && ui
+                        .button("Swap near/far")
+                        .on_hover_text("Use if the bones called \"near\" landed on the limbs behind the body")
+                        .clicked()
+                {
+                    self.edit_skeleton(|s| {
+                        s.swap_near_far();
+                    });
+                    self.status = "Swapped near and far limbs".into();
+                }
+            });
+        }
         egui::CollapsingHeader::new("Save as template").default_open(false).show(ui, |ui| {
             ui.label(egui::RichText::new("Keep these bones to use on other drawings, e.g. for a monster or an animal.").weak());
             ui.horizontal(|ui| {
@@ -1107,7 +1138,7 @@ impl AppState {
     /// Replace the skeleton with template `i`, as one undo step. It's also the
     /// template new drawings start with from now on.
     pub fn apply_template(&mut self, i: usize) {
-        let Some(t) = self.templates.get(i).cloned() else { return };
+        let Some(t) = self.templates.get(i).map(|t| self.facing(t)) else { return };
         let before = self.snapshot();
         let Some(doc) = &mut self.doc else { return };
         doc.fit_skeleton(&t);
@@ -1115,6 +1146,11 @@ impl AppState {
         self.skel_sel = SkelSel::None;
         self.status = format!("Using the {} template", t.name);
         self.commit(before);
+    }
+
+    /// `t` turned to face the chosen way (side views only; it's drawn facing right).
+    fn facing(&self, t: &Template) -> Template {
+        if self.facing_left && t.is_side_view() { t.mirrored() } else { t.clone() }
     }
 
     /// Save the current bones as a template named `name` and select it.
@@ -1665,6 +1701,21 @@ mod tests {
         state.undo();
         assert!(state.doc.as_ref().unwrap().skeleton.parts.iter().any(|p| p.name == "left forearm"));
         state.redo();
+
+        // Facing left mirrors it: the toes point left.
+        state.facing_left = true;
+        state.apply_template(side);
+        let skel = &state.doc.as_ref().unwrap().skeleton;
+        let pos = |n: &str| skel.joints.iter().find(|j| j.name == n).unwrap().pos;
+        assert!(pos("near toe")[0] < pos("near ankle")[0]);
+        let knee = pos("near knee");
+        state.edit_skeleton(|s| {
+            s.swap_near_far();
+        });
+        let skel = &state.doc.as_ref().unwrap().skeleton;
+        assert_eq!(skel.joints.iter().find(|j| j.name == "far knee").unwrap().pos, knee);
+        state.facing_left = false;
+        state.apply_template(side);
 
         // Save it as my own template (in the test app-data folder): it's listed and picked.
         let name = format!("Test monster {}", std::process::id());

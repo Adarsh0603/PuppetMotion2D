@@ -67,6 +67,25 @@ impl Skeleton {
         Skeleton { joints: Vec::new(), parts: Vec::new() }
     }
 
+    /// Swap the positions of every "near …" joint with its "far …" partner
+    /// (e.g. "near knee" ↔ "far knee"), for a side-view drawing posed with
+    /// the other limb in front. Names and layers stay. Returns whether
+    /// anything was swapped.
+    pub fn swap_near_far(&mut self) -> bool {
+        let mut swapped = false;
+        for i in 0..self.joints.len() {
+            let Some(rest) = self.joints[i].name.strip_prefix("near ") else { continue };
+            let far = format!("far {rest}");
+            if let Some(k) = self.joints.iter().position(|j| j.name == far) {
+                let (a, b) = (self.joints[i].pos, self.joints[k].pos);
+                self.joints[i].pos = b;
+                self.joints[k].pos = a;
+                swapped = true;
+            }
+        }
+        swapped
+    }
+
     pub fn bone(&self, part: usize) -> ([f32; 2], [f32; 2]) {
         let p = &self.parts[part];
         (self.joints[p.pivot].pos, self.joints[p.tip].pos)

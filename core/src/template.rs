@@ -99,6 +99,25 @@ impl Template {
         Skeleton { joints, parts }
     }
 
+    /// Whether the template has near/far limbs (a side view), so facing and
+    /// swapping near/far mean something.
+    pub fn is_side_view(&self) -> bool {
+        self.joints.iter().any(|j| j.name.starts_with("near ") || j.name.starts_with("far "))
+    }
+
+    /// The template flipped left to right: a side view facing the other way.
+    /// Turning is mirrored too, so each rotation limit `[lo, hi]` becomes `[-hi, -lo]`.
+    pub fn mirrored(&self) -> Template {
+        let mut t = self.clone();
+        for j in &mut t.joints {
+            j.at[0] = 1.0 - j.at[0];
+        }
+        for b in &mut t.bones {
+            b.limit = b.limit.map(|[lo, hi]| [-hi, -lo]);
+        }
+        t
+    }
+
     /// A template from a skeleton placed on a character whose bounding box is `bbox`.
     pub fn from_skeleton(name: &str, skel: &Skeleton, bbox: RectI) -> Template {
         let round = |v: f32, places: f32| (v * places).round() / places;
@@ -157,6 +176,31 @@ mod tests {
         for near in ["near upper arm", "near forearm", "near thigh", "near shin", "near foot"] {
             assert!(at(near) > at("torso"), "{near} is in front of the torso");
         }
+    }
+
+    #[test]
+    fn mirroring_faces_left_and_swapping_trades_near_and_far() {
+        let side = &builtin()[1];
+        assert!(side.is_side_view() && !builtin()[0].is_side_view());
+        let bbox = RectI::new(0, 0, 100, 200);
+        let (right, left) = (side.fit(bbox), side.mirrored().fit(bbox));
+        let joint = |s: &Skeleton, n: &str| s.joints.iter().find(|j| j.name == n).unwrap().pos;
+        let part = |s: &Skeleton, n: &str| s.parts.iter().find(|p| p.name == n).unwrap().clone();
+        // Toes point right when facing right, left when mirrored.
+        assert!(joint(&right, "near toe")[0] > joint(&right, "near ankle")[0]);
+        assert!(joint(&left, "near toe")[0] < joint(&left, "near ankle")[0]);
+        // A knee that bends one way bends the mirrored way.
+        let [lo, hi] = part(&right, "near shin").limit.unwrap();
+        assert_eq!(part(&left, "near shin").limit, Some([-hi, -lo]));
+        assert_eq!(part(&left, "near shin").layer, part(&right, "near shin").layer);
+
+        let mut swapped = right.clone();
+        assert!(swapped.swap_near_far());
+        assert_eq!(joint(&swapped, "near knee"), joint(&right, "far knee"));
+        assert_eq!(joint(&swapped, "far hand"), joint(&right, "near hand"));
+        assert_eq!(joint(&swapped, "hip"), joint(&right, "hip"), "shared joints stay");
+        assert_eq!(swapped.parts, right.parts, "names and layers stay");
+        assert!(!builtin()[0].fit(bbox).swap_near_far(), "nothing to swap on a front view");
     }
 
     #[test]
