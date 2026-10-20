@@ -1,11 +1,12 @@
 //! The timeline strip shown under the canvas in Pose mode: playback controls,
 //! then one row of keys per animated part (plus an "All keys" summary row and
 //! a "Position" row for whole-figure moves). Click a key to select it,
-//! Shift+click to add to the selection, click empty space to move the playhead.
+//! Shift+click to add to the selection, drag keys to move them in time,
+//! right-click for their ease, click empty space to move the playhead.
 
 use crate::state::{AppState, box_color};
 use anim_core::motion::{KEY_EPSILON, MAX_FPS};
-use anim_core::{KeyRef, Motion, TrackId};
+use anim_core::{Ease, KeyRef, Motion, TrackId};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 
 const LABEL_WIDTH: f32 = 130.0;
@@ -78,7 +79,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
             state.delete_selected_keys();
         }
         if selected > 0 {
-            ui.label(format!("{selected} selected"));
+            ui.label(format!("{selected} selected · ease"));
+            ease_picker(ui, state);
         }
         // Only there when a pose was changed with auto-key off and isn't saved yet.
         if state.unkeyed_pose {
@@ -155,7 +157,16 @@ fn is_selected(sel: &[KeyRef], r: &KeyRef) -> bool {
 fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     let doc = state.doc.as_ref().unwrap();
     let duration = doc.motion.duration.max(0.01);
-    let keys = lane_keys(&doc.motion, lane);
+    // Each key time with the keys a click there picks, and their shared ease (None if mixed).
+    let keys: Vec<(f32, Vec<KeyRef>, Option<Ease>)> = lane_keys(&doc.motion, lane)
+        .into_iter()
+        .map(|(t, refs)| {
+            let mut eases = refs.iter().filter_map(|r| doc.motion.key(r)).map(|k| k.ease);
+            let first = eases.next();
+            let ease = first.filter(|&f| eases.all(|e| e == f));
+            (t, refs, ease)
+        })
+        .collect();
     let height = if matches!(lane, Lane::All) { SUMMARY_HEIGHT } else { ROW_HEIGHT };
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -164,7 +175,8 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     let inner = bar.shrink2(vec2(8.0, 0.0));
     let x_of = |t: f32| inner.left() + inner.width() * (t / duration).clamp(0.0, 1.0);
     let t_of = |x: f32| ((x - inner.left()) / inner.width()).clamp(0.0, 1.0) * duration;
-    let snap = |t: f32| doc.motion.snap(t).min(doc.motion.duration);
+    let (fps, length) = (doc.motion.fps.max(1) as f32, doc.motion.duration);
+    let snap = |t: f32| ((t * fps).round() / fps).min(length);
 
     // Label and background.
     let (name, color) = match lane {
@@ -196,7 +208,7 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     }
 
     // Keys.
-    for (t, refs) in &keys {
+    for (t, refs, ease) in &keys {
         let selected = refs.iter().any(|r| is_selected(&state.key_sel, r));
         let at_playhead = (t - state.playhead).abs() < KEY_EPSILON;
         let fill = if selected {
@@ -207,36 +219,36 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
             Color32::from_rgb(170, 140, 70)
         };
         let outline = if selected { Color32::WHITE } else { Color32::BLACK };
-        diamond(&painter, pos2(x_of(*t), bar.center().y), if selected { 6.0 } else { 5.0 }, fill, outline);
+        key_mark(&painter, pos2(x_of(*t), bar.center().y), if selected { 6.0 } else { 5.0 }, *ease, fill, outline);
     }
     // Playhead.
     let x = x_of(state.playhead);
     painter.line_segment([pos2(x, bar.top()), pos2(x, bar.bottom())], Stroke::new(2.0, Color32::from_rgb(90, 190, 255)));
 
-    // Clicks: on a key → select it (Shift adds); elsewhere → move the playhead.
+    // Pointer: click a key to select it (Shift adds), drag keys to retime
+    // them, right-click a key to pick its ease; click or drag empty space to
+    // move the playhead.
     let shift = ui.input(|i| i.modifiers.shift);
+    let hit_at = |p: Pos2| -> Option<(f32, Vec<KeyRef>)> {
+        if !bar.contains(p) {
+            return None;
+        }
+        keys.iter()
+            .map(|(t, refs, _)| ((x_of(*t) - p.x).abs(), *t, refs))
+            .filter(|(d, ..)| *d <= KEY_HIT)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, t, refs)| (t, refs.clone()))
+    };
     if response.clicked()
         && let Some(p) = response.interact_pointer_pos()
         && bar.contains(p)
     {
-        let hit = keys
-            .iter()
-            .map(|(t, refs)| ((x_of(*t) - p.x).abs(), *t, refs))
-            .filter(|(d, ..)| *d <= KEY_HIT)
-            .min_by(|a, b| a.0.total_cmp(&b.0));
-        match hit {
-            Some((_, t, refs)) => {
+        match hit_at(p) {
+            Some((t, refs)) => {
                 if shift {
-                    let all_on = refs.iter().all(|r| is_selected(&state.key_sel, r));
-                    if all_on {
-                        state.key_sel.retain(|s| !refs.iter().any(|r| r.track == s.track && (r.t - s.t).abs() < KEY_EPSILON));
-                    } else {
-                        let new: Vec<KeyRef> =
-                            refs.iter().filter(|r| !is_selected(&state.key_sel, r)).cloned().collect();
-                        state.key_sel.extend(new);
-                    }
+                    toggle_keys(state, &refs);
                 } else {
-                    state.key_sel = refs.clone();
+                    state.key_sel = refs;
                 }
                 state.playhead = t;
             }
@@ -248,13 +260,98 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
             }
         }
         state.playing = false;
-    } else if response.dragged()
+    }
+
+    if response.drag_started() {
+        let origin = ui.input(|i| i.pointer.press_origin());
+        if let Some((t, refs)) = origin.and_then(hit_at) {
+            pick_keys(state, &refs, shift);
+            state.begin_key_drag(t);
+        }
+    }
+    if response.dragged()
         && let Some(p) = response.interact_pointer_pos()
     {
-        // Dragging anywhere on a row scrubs, frame by frame.
-        state.playhead = snap(t_of(p.x));
-        state.playing = false;
+        if state.key_drag.is_some() {
+            state.update_key_drag(t_of(p.x));
+        } else {
+            // Dragging empty space scrubs, frame by frame.
+            state.playhead = snap(t_of(p.x));
+            state.playing = false;
+        }
     }
+    if response.drag_stopped() {
+        state.end_key_drag();
+    }
+
+    if response.secondary_clicked()
+        && let Some((_, refs)) = response.interact_pointer_pos().and_then(hit_at)
+    {
+        pick_keys(state, &refs, shift);
+    }
+    if !state.key_sel.is_empty() {
+        response.context_menu(|ui| ease_menu(ui, state));
+    }
+}
+
+/// Shift+click on a key: add it to the selection, or take it out if it's already in.
+fn toggle_keys(state: &mut AppState, refs: &[KeyRef]) {
+    if refs.iter().all(|r| is_selected(&state.key_sel, r)) {
+        state.key_sel.retain(|s| !is_selected(refs, s));
+    } else {
+        let new: Vec<KeyRef> = refs.iter().filter(|r| !is_selected(&state.key_sel, r)).cloned().collect();
+        state.key_sel.extend(new);
+    }
+}
+
+/// Make sure the keys under the pointer are selected before dragging them or
+/// opening their menu: an unselected key replaces the selection (Shift adds
+/// it); a selected one keeps the whole selection, so several move together.
+fn pick_keys(state: &mut AppState, refs: &[KeyRef], shift: bool) {
+    if refs.iter().all(|r| is_selected(&state.key_sel, r)) {
+        return;
+    }
+    if shift {
+        toggle_keys(state, refs);
+    } else {
+        state.key_sel = refs.to_vec();
+    }
+}
+
+/// The eases a key can have, with what each one does.
+const EASES: [(Ease, &str, &str); 3] = [
+    (Ease::Smooth, "◆ Smooth", "Starts slow, speeds up, ends slow"),
+    (Ease::Linear, "● Linear", "Constant speed"),
+    (Ease::Hold, "■ Hold", "Stays on this pose, then jumps to the next key"),
+];
+
+/// Right-click menu on keys: how the selected keys travel to the next key.
+fn ease_menu(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.label(format!("{} selected: move to the next key with", state.key_sel.len()));
+    let current = state.selected_ease();
+    for (ease, name, hint) in EASES {
+        if ui.radio(current == Some(ease), name).on_hover_text(hint).clicked() {
+            state.set_selected_ease(ease);
+            ui.close();
+        }
+    }
+}
+
+/// Ease picker in the timeline bar, for the selected keys.
+fn ease_picker(ui: &mut egui::Ui, state: &mut AppState) {
+    let current = state.selected_ease();
+    let text = current.and_then(|c| EASES.iter().find(|e| e.0 == c)).map_or("Mixed", |e| e.1);
+    egui::ComboBox::from_id_salt("ease")
+        .selected_text(text)
+        .show_ui(ui, |ui| {
+            for (ease, name, hint) in EASES {
+                if ui.selectable_label(current == Some(ease), name).on_hover_text(hint).clicked() {
+                    state.set_selected_ease(ease);
+                }
+            }
+        })
+        .response
+        .on_hover_text("How the selected keys move to the next key.\nRight-click a key for the same choice.");
 }
 
 /// Motion length in seconds, moving a frame at a time. A whole drag of the
@@ -300,7 +397,21 @@ fn fps_editor(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-fn diamond(painter: &egui::Painter, c: Pos2, r: f32, fill: Color32, outline: Color32) {
-    let pts = vec![c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)];
-    painter.add(egui::Shape::convex_polygon(pts, fill, Stroke::new(1.0, outline)));
+/// A key on the timeline; its shape shows its ease: ◆ Smooth (or mixed), ● Linear, ■ Hold.
+fn key_mark(painter: &egui::Painter, c: Pos2, r: f32, ease: Option<Ease>, fill: Color32, outline: Color32) {
+    let stroke = Stroke::new(1.0, outline);
+    match ease {
+        Some(Ease::Linear) => {
+            painter.circle(c, r * 0.85, fill, stroke);
+        }
+        Some(Ease::Hold) => {
+            let s = r * 0.8;
+            let pts = vec![c + vec2(-s, -s), c + vec2(s, -s), c + vec2(s, s), c + vec2(-s, s)];
+            painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+        }
+        _ => {
+            let pts = vec![c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)];
+            painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+        }
+    }
 }

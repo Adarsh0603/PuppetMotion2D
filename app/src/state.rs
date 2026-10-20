@@ -2,7 +2,7 @@ use crate::canvas::{Drag, View};
 use crate::export::ExportUi;
 use anim_core::{
 
-    Axis, Clip, History, KeyRef, Mask, Motion, Params, PartBox, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, foreground_mask,
+    Axis, Clip, Ease, History, KeyRef, Mask, Motion, Params, PartBox, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, foreground_mask,
     load_project, part_masks, project, save_project, skeleton_masks, write_parts,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -57,6 +57,17 @@ pub struct Snapshot {
     pub boxes: Vec<PartBox>,
     pub pose: Pose,
     pub motion: Motion,
+}
+
+/// Keys being dragged along the timeline.
+pub struct KeyDrag {
+    /// Time of the key under the pointer when the drag began.
+    grab_t: f32,
+    /// The selection and the motion as they were when the drag began.
+    sel: Vec<KeyRef>,
+    motion: Motion,
+    /// For the undo step recorded when the drag ends.
+    before: Option<Snapshot>,
 }
 
 pub struct BoxItem {
@@ -192,6 +203,8 @@ pub struct AppState {
     pub sampled_at: f32,
     /// Keys selected on the timeline (for copy, paste, delete).
     pub key_sel: Vec<KeyRef>,
+    /// Keys being dragged along the timeline, if any.
+    pub key_drag: Option<KeyDrag>,
     /// Last copied keys, used if the system clipboard has something else on it.
     pub clip: Option<Clip>,
     /// Selected box (boxes mode).
@@ -240,6 +253,7 @@ impl Default for AppState {
             unkeyed_pose: false,
             sampled_at: 0.0,
             key_sel: Vec::new(),
+            key_drag: None,
             clip: None,
             selected: None,
             skel_sel: SkelSel::None,
@@ -451,6 +465,60 @@ impl AppState {
         let t = self.key_time();
         let Some(doc) = &mut self.doc else { return };
         doc.motion.set_keys(t, &doc.skeleton, &doc.pose, None);
+        self.commit(before);
+    }
+
+    /// Start dragging the selected keys along the timeline; `grab_t` is the
+    /// time of the key under the pointer.
+    pub fn begin_key_drag(&mut self, grab_t: f32) {
+        let Some(doc) = &self.doc else { return };
+        if self.key_sel.is_empty() {
+            return;
+        }
+        self.key_drag =
+            Some(KeyDrag { grab_t, sel: self.key_sel.clone(), motion: doc.motion.clone(), before: self.snapshot() });
+        self.playing = false;
+    }
+
+    /// Move the dragged keys so the grabbed one sits on the frame nearest `t`.
+    /// Each call redoes the whole move from the keys as they were when the
+    /// drag began, so passing over other keys doesn't eat them.
+    pub fn update_key_drag(&mut self, t: f32) {
+        let (Some(drag), Some(doc)) = (&self.key_drag, &mut self.doc) else { return };
+        let earliest = drag.sel.iter().map(|r| r.t).fold(f32::INFINITY, f32::min);
+        let dt = (drag.motion.snap(t) - drag.grab_t).max(-earliest);
+        doc.motion = drag.motion.clone();
+        self.key_sel = doc.motion.move_keys(&drag.sel, dt);
+        self.playhead = drag.grab_t + dt;
+        self.unkeyed_pose = false;
+    }
+
+    /// Finish a key drag as one undo step.
+    pub fn end_key_drag(&mut self) {
+        let Some(drag) = self.key_drag.take() else { return };
+        if let Some(doc) = &self.doc {
+            let frames = doc.motion.frame_at(self.playhead) - doc.motion.frame_at(drag.grab_t);
+            if frames != 0 {
+                self.status = format!("Moved {} keys by {frames:+} frames", self.key_sel.len());
+            }
+        }
+        self.commit(drag.before);
+    }
+
+    /// The ease shared by every selected key, None if they differ (or none are selected).
+    pub fn selected_ease(&self) -> Option<Ease> {
+        let doc = self.doc.as_ref()?;
+        let mut eases = self.key_sel.iter().filter_map(|r| doc.motion.key(r)).map(|k| k.ease);
+        let first = eases.next()?;
+        eases.all(|e| e == first).then_some(first)
+    }
+
+    /// Set how the selected keys travel to their next key, as one undo step.
+    pub fn set_selected_ease(&mut self, ease: Ease) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        doc.motion.set_ease(&self.key_sel, ease);
+        self.status = format!("{} keys set to {ease:?}", self.key_sel.len());
         self.commit(before);
     }
 
@@ -1362,6 +1430,44 @@ mod tests {
         let m = &state.doc.as_ref().unwrap().motion;
         let expected = m.sample(1.2, &state.doc.as_ref().unwrap().skeleton);
         assert_eq!(state.doc.as_ref().unwrap().pose, expected);
+    }
+
+    #[test]
+    fn dragging_keys_retimes_them_and_ease_is_set_per_key() {
+        let mut state = open_sample();
+        state.mode = Mode::Pose;
+        state.playhead = 0.0;
+        state.key_all();
+        state.playhead = 1.0;
+        state.key_all();
+        state.playhead = 2.0;
+        state.key_all();
+
+        // Drag the keys at 1.0 s: passing over the 2.0 s keys doesn't eat
+        // them, and they land on a frame (24 fps).
+        state.key_sel = state.doc.as_ref().unwrap().motion.keys_at(1.0);
+        state.begin_key_drag(1.0);
+        state.update_key_drag(2.3);
+        state.update_key_drag(1.51);
+        state.end_key_drag();
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.0, 1.5, 2.0]);
+        assert_eq!(state.playhead, 1.5, "playhead follows the grabbed key");
+        assert!(state.key_sel.iter().all(|r| r.t == 1.5), "selection follows the keys");
+
+        // One undo step puts them back.
+        state.undo();
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.0, 1.0, 2.0]);
+
+        // Ease: set on the selection, shared value read back, undoable.
+        state.key_sel = state.doc.as_ref().unwrap().motion.keys_at(0.0);
+        assert_eq!(state.selected_ease(), Some(Ease::Smooth));
+        state.set_selected_ease(Ease::Hold);
+        assert_eq!(state.selected_ease(), Some(Ease::Hold));
+        state.key_sel.extend(state.doc.as_ref().unwrap().motion.keys_at(1.0));
+        assert_eq!(state.selected_ease(), None, "mixed");
+        state.undo();
+        state.key_sel = state.doc.as_ref().unwrap().motion.keys_at(0.0);
+        assert_eq!(state.selected_ease(), Some(Ease::Smooth));
     }
 
     #[test]

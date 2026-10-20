@@ -222,6 +222,43 @@ impl Motion {
         pasted
     }
 
+    /// The key a reference points at.
+    pub fn key(&self, r: &KeyRef) -> Option<&Key> {
+        self.track(&r.track)?.iter().find(|k| (k.t - r.t).abs() < KEY_EPSILON)
+    }
+
+    /// Move the referenced keys `dt` seconds later (earlier if negative),
+    /// never before 0. Keys they land on that aren't being moved are
+    /// replaced. Returns references to the moved keys.
+    pub fn move_keys(&mut self, sel: &[KeyRef], dt: f32) -> Vec<KeyRef> {
+        let picked: Vec<(TrackId, Key)> = sel.iter().filter_map(|r| Some((r.track.clone(), *self.key(r)?))).collect();
+        let earliest = picked.iter().map(|(_, k)| k.t).fold(f32::INFINITY, f32::min);
+        let dt = if earliest.is_finite() { dt.max(-earliest) } else { dt };
+        // Lift them all out first, so keys moving past each other don't collide.
+        for (id, k) in &picked {
+            self.track_mut(id).retain(|o| (o.t - k.t).abs() >= KEY_EPSILON);
+        }
+        let mut moved = Vec::with_capacity(picked.len());
+        for (id, k) in picked {
+            let key = Key { t: k.t + dt, ..k };
+            insert_key(self.track_mut(&id), key);
+            self.duration = self.duration.max(key.t);
+            moved.push(KeyRef { track: id, t: key.t });
+        }
+        self.tracks.retain(|_, k| !k.is_empty());
+        moved
+    }
+
+    /// Set how each referenced key travels to the next one.
+    pub fn set_ease(&mut self, sel: &[KeyRef], ease: Ease) {
+        for r in sel {
+            if let Some(k) = self.track_mut(&r.track).iter_mut().find(|k| (k.t - r.t).abs() < KEY_EPSILON) {
+                k.ease = ease;
+            }
+        }
+        self.tracks.retain(|_, k| !k.is_empty());
+    }
+
     /// Delete the referenced keys.
     pub fn remove(&mut self, sel: &[KeyRef]) {
         for r in sel {
@@ -325,6 +362,33 @@ mod tests {
 
     fn key(t: f32, value: f32, ease: Ease) -> Key {
         Key { t, value, ease }
+    }
+
+    #[test]
+    fn moving_keys_shifts_replaces_and_stops_at_zero() {
+        let arm = TrackId::Part("arm".into());
+        let mut m = Motion::default();
+        m.tracks.insert("arm".into(), vec![key(0.5, 1.0, Ease::Smooth), key(1.0, 2.0, Ease::Hold), key(2.0, 3.0, Ease::Linear)]);
+        let r = |t: f32| KeyRef { track: arm.clone(), t };
+
+        // Two keys move together, keeping their gap and values.
+        let moved = m.move_keys(&[r(0.5), r(1.0)], 0.5);
+        assert_eq!(moved, vec![r(1.0), r(1.5)]);
+        let arm_keys = &m.tracks["arm"];
+        assert_eq!(arm_keys.iter().map(|k| (k.t, k.value)).collect::<Vec<_>>(), vec![(1.0, 1.0), (1.5, 2.0), (2.0, 3.0)]);
+        assert_eq!(arm_keys[1].ease, Ease::Hold, "ease travels with the key");
+
+        // Landing on an unselected key replaces it.
+        m.move_keys(&[r(1.5)], 0.5);
+        assert_eq!(m.tracks["arm"].iter().map(|k| (k.t, k.value)).collect::<Vec<_>>(), vec![(1.0, 1.0), (2.0, 2.0)]);
+
+        // Can't go before 0; past the end grows the length.
+        assert_eq!(m.move_keys(&[r(1.0)], -5.0), vec![r(0.0)]);
+        m.move_keys(&[r(2.0)], 3.0);
+        assert_eq!(m.duration, 5.0);
+
+        m.set_ease(&[r(0.0)], Ease::Linear);
+        assert_eq!(m.key(&r(0.0)).unwrap().ease, Ease::Linear);
     }
 
     #[test]

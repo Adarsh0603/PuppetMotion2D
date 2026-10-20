@@ -54,7 +54,7 @@ impl App {
             let before = self.state.field_before.take();
             self.state.commit(before);
         }
-        if !matches!(self.state.drag, canvas::Drag::None) {
+        if !matches!(self.state.drag, canvas::Drag::None) || self.state.key_drag.is_some() {
             return;
         }
         use egui::{Key, KeyboardShortcut, Modifiers};
