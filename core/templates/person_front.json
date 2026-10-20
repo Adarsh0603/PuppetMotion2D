@@ -1,0 +1,32 @@
+{
+  "name": "Person (front)",
+  "joints": [
+    { "name": "head top", "at": [0.5, 0.03] },
+    { "name": "neck", "at": [0.5, 0.24] },
+    { "name": "pelvis", "at": [0.5, 0.62] },
+    { "name": "left shoulder", "at": [0.36, 0.30] },
+    { "name": "left elbow", "at": [0.24, 0.43] },
+    { "name": "left hand", "at": [0.12, 0.56] },
+    { "name": "right shoulder", "at": [0.64, 0.30] },
+    { "name": "right elbow", "at": [0.76, 0.43] },
+    { "name": "right hand", "at": [0.88, 0.56] },
+    { "name": "left hip", "at": [0.42, 0.66] },
+    { "name": "left knee", "at": [0.40, 0.815] },
+    { "name": "left foot", "at": [0.38, 0.97] },
+    { "name": "right hip", "at": [0.58, 0.66] },
+    { "name": "right knee", "at": [0.60, 0.815] },
+    { "name": "right foot", "at": [0.62, 0.97] }
+  ],
+  "bones": [
+    { "name": "head", "from": "neck", "to": "head top", "parent": "torso", "limit": [-40, 40] },
+    { "name": "torso", "from": "pelvis", "to": "neck", "limit": [-60, 60] },
+    { "name": "left upper arm", "from": "left shoulder", "to": "left elbow", "parent": "torso" },
+    { "name": "left forearm", "from": "left elbow", "to": "left hand", "parent": "left upper arm", "limit": [-150, 150] },
+    { "name": "right upper arm", "from": "right shoulder", "to": "right elbow", "parent": "torso" },
+    { "name": "right forearm", "from": "right elbow", "to": "right hand", "parent": "right upper arm", "limit": [-150, 150] },
+    { "name": "left thigh", "from": "left hip", "to": "left knee", "parent": "torso" },
+    { "name": "left shin", "from": "left knee", "to": "left foot", "parent": "left thigh", "limit": [-150, 150] },
+    { "name": "right thigh", "from": "right hip", "to": "right knee", "parent": "torso" },
+    { "name": "right shin", "from": "right knee", "to": "right foot", "parent": "right thigh", "limit": [-150, 150] }
+  ]
+}

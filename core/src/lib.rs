@@ -11,6 +11,7 @@ pub mod project;
 pub mod rig;
 pub mod skeleton;
 pub mod sprites;
+pub mod template;
 
 pub use cutout::{Params, foreground_mask};
 pub use geom::RectI;
@@ -23,3 +24,4 @@ pub use rig::{
 };
 pub use sprites::{Sprite, build_sprites};
 pub use skeleton::{Joint, SkelPart, Skeleton, SkeletonMasks, Toward, skeleton_masks};
+pub use template::Template;

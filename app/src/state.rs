@@ -2,7 +2,7 @@ use crate::canvas::{Drag, View};
 use crate::export::ExportUi;
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Ease, History, KeyRef, Toward, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    Clip, Ease, History, KeyRef, Template, Toward, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
     foreground_mask, load_project, project, save_project, skeleton_masks,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -164,11 +164,15 @@ impl Doc {
         self.sprites_dirty = true;
     }
 
-    /// Place the template skeleton over the figure's bounding box.
-    pub fn fit_skeleton(&mut self) {
+    /// The character's bounding box (the whole image if nothing was found).
+    pub fn figure_box(&self) -> RectI {
         let (w, h) = self.image.dimensions();
-        let bbox = self.fg.bbox().unwrap_or(RectI::new(0, 0, w as i32, h as i32));
-        self.skeleton = Skeleton::person_front(bbox);
+        self.fg.bbox().unwrap_or(RectI::new(0, 0, w as i32, h as i32))
+    }
+
+    /// Replace the skeleton with `template`, fitted over the character.
+    pub fn fit_skeleton(&mut self, template: &Template) {
+        self.skeleton = template.fit(self.figure_box());
         self.reset_pose();
         self.recompute_skeleton();
     }
@@ -218,6 +222,12 @@ pub struct AppState {
     pub show_bones: bool,
     /// Part whose row the pointer is on in the Layers list; the canvas lights it up.
     pub highlight_part: Option<usize>,
+    /// Skeleton templates: built-in ones, then the user's own.
+    pub templates: Vec<Template>,
+    /// The template picked in Rig; new drawings start with it.
+    pub template_choice: usize,
+    /// Name typed under "Save as template".
+    pub template_name: String,
     pub status: String,
     /// Set when a new image is loaded so the canvas fits it on the next frame.
     pub fit_pending: bool,
@@ -254,6 +264,9 @@ impl Default for AppState {
             show_ghost: false,
             show_bones: true,
             highlight_part: None,
+            templates: crate::templates::all(),
+            template_choice: 0,
+            template_name: String::new(),
             status: "Open or drop a drawing to start.".into(),
             fit_pending: false,
             export: ExportUi::default(),
@@ -284,9 +297,12 @@ impl AppState {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
         let Some(mut doc) = self.load_doc(ctx, &name, bytes, ext) else { return };
-        doc.fit_skeleton();
+        // Start with the template last used (Person (front) at first).
+        if let Some(t) = self.templates.get(self.template_choice).or(self.templates.first()) {
+            doc.fit_skeleton(t);
+        }
         self.set_doc(doc);
-        // A new drawing starts at Import, so the cutout can be checked first.
+        // A new drawing starts at Review, so the cutout can be checked first.
         self.set_step(Step::Review);
     }
 
@@ -1054,6 +1070,68 @@ impl AppState {
         }
     }
 
+    /// Template picker (Use replaces the bones), Clear, and "Save as template".
+    fn template_controls(&mut self, ui: &mut egui::Ui) {
+        self.template_choice = self.template_choice.min(self.templates.len().saturating_sub(1));
+        ui.horizontal(|ui| {
+            ui.label("Template");
+            let current = self.templates.get(self.template_choice).map_or("", |t| t.name.as_str()).to_string();
+            egui::ComboBox::from_id_salt("template").selected_text(current).show_ui(ui, |ui| {
+                for (i, t) in self.templates.iter().enumerate() {
+                    ui.selectable_value(&mut self.template_choice, i, &t.name);
+                }
+            });
+            if ui.button("Use").on_hover_text("Replace the bones with this template, fitted to the character").clicked() {
+                self.apply_template(self.template_choice);
+            }
+            if ui.button("Clear").on_hover_text("Remove all bones and start from scratch").clicked() {
+                self.edit_skeleton(|s| *s = Skeleton::empty());
+            }
+        });
+        egui::CollapsingHeader::new("Save as template").default_open(false).show(ui, |ui| {
+            ui.label(egui::RichText::new("Keep these bones to use on other drawings, e.g. for a monster or an animal.").weak());
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.template_name).hint_text("Name").desired_width(140.0));
+                let name = self.template_name.trim().to_string();
+                let ok = !name.is_empty() && !crate::templates::is_builtin(&name);
+                if ui.add_enabled(ok, egui::Button::new("Save")).clicked() {
+                    self.save_template(&name);
+                }
+            });
+            if crate::templates::is_builtin(&self.template_name) {
+                ui.label(egui::RichText::new("That name belongs to a built-in template; pick another.").weak());
+            }
+        });
+    }
+
+    /// Replace the skeleton with template `i`, as one undo step. It's also the
+    /// template new drawings start with from now on.
+    pub fn apply_template(&mut self, i: usize) {
+        let Some(t) = self.templates.get(i).cloned() else { return };
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        doc.fit_skeleton(&t);
+        self.template_choice = i;
+        self.skel_sel = SkelSel::None;
+        self.status = format!("Using the {} template", t.name);
+        self.commit(before);
+    }
+
+    /// Save the current bones as a template named `name` and select it.
+    pub fn save_template(&mut self, name: &str) {
+        let Some(doc) = &self.doc else { return };
+        let t = Template::from_skeleton(name, &doc.skeleton, doc.figure_box());
+        self.status = match crate::templates::save(&t) {
+            Ok(_) => {
+                self.templates = crate::templates::all();
+                self.template_choice = self.templates.iter().position(|o| o.name == t.name).unwrap_or(0);
+                self.template_name.clear();
+                format!("Saved template {}", t.name)
+            }
+            Err(e) => format!("Could not save the template: {e}"),
+        };
+    }
+
     fn rig_section(&mut self, ui: &mut egui::Ui) {
         if self.doc.is_none() {
             return;
@@ -1067,19 +1145,7 @@ impl AppState {
         {
             doc.overlay_dirty = true;
         }
-        ui.horizontal(|ui| {
-            if ui.button("Person template").on_hover_text("Replace with a stick person fitted to the figure").clicked() {
-                let before = self.snapshot();
-                if let Some(doc) = &mut self.doc {
-                    doc.fit_skeleton();
-                }
-                self.commit(before);
-                self.skel_sel = SkelSel::None;
-            }
-            if ui.button("Clear").on_hover_text("Remove all bones and start from scratch").clicked() {
-                self.edit_skeleton(|s| *s = Skeleton::empty());
-            }
-        });
+        self.template_controls(ui);
 
         let doc = self.doc.as_ref().unwrap();
         if doc.skeleton.parts.is_empty() {
@@ -1584,6 +1650,33 @@ mod tests {
         assert!(doc.dirty);
         state.undo();
         assert_eq!(state.doc.as_ref().unwrap().skeleton.paint_order(), before);
+    }
+
+    #[test]
+    fn templates_apply_save_and_start_new_drawings() {
+        let mut state = open_sample();
+        let side = state.templates.iter().position(|t| t.name == "Person (side)").expect("built in");
+
+        // Use the side template: one undo step, far limbs behind the torso.
+        state.apply_template(side);
+        let skel = &state.doc.as_ref().unwrap().skeleton;
+        assert!(skel.parts.iter().any(|p| p.name == "near foot"));
+        assert_eq!(skel.parts[skel.paint_order()[0]].name, "far upper arm");
+        state.undo();
+        assert!(state.doc.as_ref().unwrap().skeleton.parts.iter().any(|p| p.name == "left forearm"));
+        state.redo();
+
+        // Save it as my own template (in the test app-data folder): it's listed and picked.
+        let name = format!("Test monster {}", std::process::id());
+        state.save_template(&name);
+        assert_eq!(state.templates[state.template_choice].name, name, "{}", state.status);
+        assert!(crate::templates::all().iter().any(|t| t.name == name));
+
+        // The next drawing starts with the chosen template.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../testdata/synthetic_sketch.png");
+        state.open(&egui::Context::default(), &path);
+        assert!(state.doc.as_ref().unwrap().skeleton.parts.iter().any(|p| p.name == "near foot"));
+        let _ = std::fs::remove_dir_all(crate::paths::app_data_dir());
     }
 
     #[test]

@@ -4,7 +4,9 @@
 
 mod canvas;
 mod export;
+mod paths;
 mod state;
+mod templates;
 mod timeline;
 mod unsaved;
 

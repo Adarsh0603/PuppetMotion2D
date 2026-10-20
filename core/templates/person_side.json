@@ -1,0 +1,33 @@
+{
+  "name": "Person (side)",
+  "joints": [
+    { "name": "head top", "at": [0.52, 0.03] },
+    { "name": "neck", "at": [0.50, 0.21] },
+    { "name": "shoulder", "at": [0.50, 0.26] },
+    { "name": "hip", "at": [0.48, 0.56] },
+    { "name": "near elbow", "at": [0.58, 0.40] },
+    { "name": "near hand", "at": [0.64, 0.53] },
+    { "name": "far elbow", "at": [0.42, 0.40] },
+    { "name": "far hand", "at": [0.38, 0.53] },
+    { "name": "near knee", "at": [0.56, 0.76] },
+    { "name": "near ankle", "at": [0.58, 0.95] },
+    { "name": "near toe", "at": [0.68, 0.98] },
+    { "name": "far knee", "at": [0.42, 0.76] },
+    { "name": "far ankle", "at": [0.38, 0.95] },
+    { "name": "far toe", "at": [0.48, 0.98] }
+  ],
+  "bones": [
+    { "name": "far upper arm", "from": "shoulder", "to": "far elbow", "parent": "torso", "layer": 0 },
+    { "name": "far forearm", "from": "far elbow", "to": "far hand", "parent": "far upper arm", "limit": [-150, 10], "layer": 1 },
+    { "name": "far thigh", "from": "hip", "to": "far knee", "parent": "torso", "limit": [-100, 100], "layer": 2 },
+    { "name": "far shin", "from": "far knee", "to": "far ankle", "parent": "far thigh", "limit": [-10, 150], "layer": 3 },
+    { "name": "far foot", "from": "far ankle", "to": "far toe", "parent": "far shin", "limit": [-40, 40], "layer": 4 },
+    { "name": "torso", "from": "hip", "to": "neck", "limit": [-60, 60], "layer": 5 },
+    { "name": "head", "from": "neck", "to": "head top", "parent": "torso", "limit": [-40, 40], "layer": 6 },
+    { "name": "near thigh", "from": "hip", "to": "near knee", "parent": "torso", "limit": [-100, 100], "layer": 7 },
+    { "name": "near shin", "from": "near knee", "to": "near ankle", "parent": "near thigh", "limit": [-10, 150], "layer": 8 },
+    { "name": "near foot", "from": "near ankle", "to": "near toe", "parent": "near shin", "limit": [-40, 40], "layer": 9 },
+    { "name": "near upper arm", "from": "shoulder", "to": "near elbow", "parent": "torso", "layer": 10 },
+    { "name": "near forearm", "from": "near elbow", "to": "near hand", "parent": "near upper arm", "limit": [-150, 10], "layer": 11 }
+  ]
+}

@@ -55,57 +55,12 @@ pub struct Skeleton {
 }
 
 impl Skeleton {
-    /// Front-facing stick person scaled into `bbox` (usually the foreground's
-    /// bounding box). Left/right are as seen on screen. Stand-in until Step 4
-    /// moves templates into JSON.
+    /// Front-facing stick person (the built-in "Person (front)" template)
+    /// scaled into `bbox`, usually the foreground's bounding box. Left/right
+    /// are as seen on screen. The torso is the root; a forearm's pivot is its
+    /// upper arm's tip (the elbow), which is what lets IK move the two together.
     pub fn person_front(bbox: RectI) -> Skeleton {
-        let at = |u: f32, v: f32| [bbox.x as f32 + u * bbox.w as f32, bbox.y as f32 + v * bbox.h as f32];
-        let joints = [
-            ("head top", at(0.5, 0.03)),      // 0
-            ("neck", at(0.5, 0.24)),          // 1
-            ("pelvis", at(0.5, 0.62)),        // 2
-            ("left shoulder", at(0.36, 0.30)), // 3
-            ("left elbow", at(0.24, 0.43)),   // 4
-            ("left hand", at(0.12, 0.56)),    // 5
-            ("right shoulder", at(0.64, 0.30)), // 6
-            ("right elbow", at(0.76, 0.43)),  // 7
-            ("right hand", at(0.88, 0.56)),   // 8
-            ("left hip", at(0.42, 0.66)),     // 9
-            ("left knee", at(0.40, 0.815)),   // 10
-            ("left foot", at(0.38, 0.97)),    // 11
-            ("right hip", at(0.58, 0.66)),    // 12
-            ("right knee", at(0.60, 0.815)),  // 13
-            ("right foot", at(0.62, 0.97)),   // 14
-        ];
-        // (name, pivot, tip, parent part, rotation limit in degrees). The torso
-        // is the root; a forearm's pivot is its upper arm's tip (the elbow),
-        // which is what lets IK move the two together.
-        let parts = [
-            ("head", 1, 0, Some(1), Some(40.0_f32)),
-            ("torso", 2, 1, None, Some(60.0)),
-            ("left upper arm", 3, 4, Some(1), None),
-            ("left forearm", 4, 5, Some(2), Some(150.0)),
-            ("right upper arm", 6, 7, Some(1), None),
-            ("right forearm", 7, 8, Some(4), Some(150.0)),
-            ("left thigh", 9, 10, Some(1), None),
-            ("left shin", 10, 11, Some(6), Some(150.0)),
-            ("right thigh", 12, 13, Some(1), None),
-            ("right shin", 13, 14, Some(8), Some(150.0)),
-        ];
-        Skeleton {
-            joints: joints.iter().map(|&(n, pos)| Joint { name: n.into(), pos }).collect(),
-            parts: parts
-                .iter()
-                .map(|&(n, pivot, tip, parent, limit)| SkelPart {
-                    name: n.into(),
-                    pivot,
-                    tip,
-                    parent,
-                    limit: limit.map(|d| [-d.to_radians(), d.to_radians()]),
-                    layer: 0,
-                })
-                .collect(),
-        }
+        crate::template::builtin()[0].fit(bbox)
     }
 
     pub fn empty() -> Skeleton {

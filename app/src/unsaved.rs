@@ -78,18 +78,9 @@ impl Unsaved {
     }
 }
 
-/// Where recovery copies go: the per-user app-data folder.
+/// Where recovery copies go: a folder in the per-user app-data folder.
 pub fn recovery_dir() -> PathBuf {
-    // Tests must never touch (or delete) a real recovery copy.
-    if cfg!(test) {
-        return std::env::temp_dir().join(format!("pm2d_test_recovery_{}", std::process::id()));
-    }
-    let base = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("XDG_DATA_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("PuppetMotion2D").join("recovery")
+    crate::paths::app_data_dir().join("recovery")
 }
 
 /// Copy unsaved changes to the recovery file, at most once a minute. Call once per frame.
