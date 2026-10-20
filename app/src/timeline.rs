@@ -67,6 +67,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         if ui.add_enabled(selected > 0, egui::Button::new("Copy")).on_hover_text("Ctrl+C").clicked() {
             state.copy_keys(ui.ctx());
         }
+        if ui.add_enabled(selected > 0, egui::Button::new("Cut")).on_hover_text("Ctrl+X").clicked() {
+            state.cut_keys(ui.ctx());
+        }
         let can_paste = state.clip.as_ref().is_some_and(|c| !c.is_empty());
         if ui.add_enabled(can_paste, egui::Button::new("Paste")).on_hover_text("Ctrl+V: at the playhead").clicked() {
             state.paste_keys(None);

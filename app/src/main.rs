@@ -105,21 +105,26 @@ impl App {
 }
 
 impl App {
-    /// Timeline keys in Pose mode: Ctrl+C copies the selected keys, Ctrl+V pastes
-    /// at the playhead, Delete removes them. egui turns Ctrl+C/Ctrl+V into Copy
-    /// and Paste events (Paste carries the system clipboard's text).
+    /// Timeline keys in Pose mode: Ctrl+C copies the selected keys, Ctrl+X cuts
+    /// them, Ctrl+V pastes at the playhead, Delete removes them. egui turns
+    /// Ctrl+C/X/V into Copy, Cut and Paste events (Paste carries the system
+    /// clipboard's text).
     fn key_shortcuts(&mut self, ctx: &egui::Context) {
-        let (copy, paste, paste_other) = ctx.input(|i| {
+        let (copy, cut, paste, paste_other) = ctx.input(|i| {
             let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+            let cut = i.events.iter().any(|e| matches!(e, egui::Event::Cut));
             let paste = i.events.iter().find_map(|e| match e {
                 egui::Event::Paste(text) => Some(text.clone()),
                 _ => None,
             });
             let paste_other = i.events.iter().any(|e| matches!(e, egui::Event::PasteImage(_)));
-            (copy, paste, paste_other)
+            (copy, cut, paste, paste_other)
         });
         if copy {
             self.state.copy_keys(ctx);
+        }
+        if cut {
+            self.state.cut_keys(ctx);
         }
         if let Some(text) = paste {
             self.state.paste_keys(Some(&text));

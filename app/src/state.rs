@@ -476,6 +476,17 @@ impl AppState {
         self.clip = Some(clip);
     }
 
+    /// Copy the selected keys, then delete them (one undo step).
+    pub fn cut_keys(&mut self, ctx: &egui::Context) {
+        if self.key_sel.is_empty() {
+            return;
+        }
+        self.copy_keys(ctx);
+        let n = self.key_sel.len();
+        self.delete_selected_keys();
+        self.status = format!("Cut {n} keys");
+    }
+
     /// Paste keys at the playhead: `text` from the system clipboard if it holds
     /// copied keys, else the last keys copied in this app. The pasted keys
     /// become the selection.
@@ -1375,6 +1386,19 @@ mod tests {
         state.playhead = 2.5;
         state.paste_keys(Some("not keys"));
         assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.5, 2.0, 2.5]);
+
+        // Cut = copy + delete in one undo step; paste brings them back.
+        state.key_sel = state.doc.as_ref().unwrap().motion.keys_at(2.0);
+        state.cut_keys(&ctx);
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.5, 2.5]);
+        state.playhead = 2.0;
+        state.paste_keys(None);
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.5, 2.0, 2.5]);
+        state.undo();
+        state.undo();
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.5, 2.0, 2.5], "undoing the cut restores the keys");
+        state.redo();
+        state.redo();
 
         // Ctrl+A selects every key across all three times.
         state.select_all_keys();
