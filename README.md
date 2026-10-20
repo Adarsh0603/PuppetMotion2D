@@ -24,6 +24,9 @@ Free and open source, written in Rust with [egui](https://github.com/emilk/egui)
 - **Automatic cutout:** works with transparent PNGs and with drawings on plain or slightly textured paper, including sketchy outlines with small gaps.
 - **Skeletons:** front and side-view person templates, a free-form bone editor, rotation limits, and saving your own templates.
 - **Posing:** two-bone IK, so dragging a hand bends the elbow. Children follow their parents, and a draw-order list puts the far arm behind the body.
+- **Bending:** the drawing is a mesh that bends smoothly at elbows, knees and other joints, with one softness setting from stiff cut-out to soft and squishy.
+- **Weight brush:** paint where each bone pulls the drawing (Add, Remove, Smooth), for example so hair follows the head. A heat map shows the result as you paint.
+- **Fill behind parts:** guesses what's hidden behind an arm or the head, so moving them shows more body instead of a hole.
 - **Timeline:** keys per bone, Smooth / Linear / Hold easing per key, dragging keys to retime them, frame-rate snapping, and copy / cut / paste of keys, even between projects.
 - **Export:** GIF or PNG frames, cropped to the moving character, at any size and frame rate, with a transparent or coloured background.
 - **Safe to use:** undo / redo, `.pm2d` project files that include the original image, a "Save changes?" prompt, and autosave with crash recovery.
@@ -60,7 +63,6 @@ The code is split into three crates:
 
 This is an early version that's being actively developed. Next up:
 
-- **Bending meshes:** the drawing will deform smoothly at the joints instead of moving as rigid pieces, with automatic weights and a brush to fine-tune them. This also makes boneless characters like slimes and tails possible.
 - **Layered characters:** import each part as its own image (or a PSD) for clean side-view walk cycles.
 - **Onion skinning**, a **motion library** to reuse walks on any character, **sprite sheets**, and **MP4** export.
 
