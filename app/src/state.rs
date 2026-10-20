@@ -888,14 +888,14 @@ impl AppState {
             ui.label("No bones. Shift+drag on the drawing to add one.");
         }
         let mut clicked = None;
-        for (i, part) in doc.skeleton.parts.iter().enumerate() {
-            let px = doc.skel_masks.get(i).map_or(0, Mask::count);
-            let r = doc.skel_radii.get(i).copied().unwrap_or(0.0);
-            let text = format!("{}  thickness {:.0} px  mask {} px", part.name, 2.0 * r, px);
-            let text = egui::RichText::new(text).color(box_color(i));
-            if ui.selectable_label(self.skel_sel == SkelSel::Part(i), text).clicked() {
-                clicked = Some(i);
-            }
+        for (i, depth) in doc.skeleton.tree_order() {
+            let text = egui::RichText::new(&doc.skeleton.parts[i].name).color(box_color(i));
+            ui.horizontal(|ui| {
+                ui.add_space(16.0 * depth as f32);
+                if ui.selectable_label(self.skel_sel == SkelSel::Part(i), text).clicked() {
+                    clicked = Some(i);
+                }
+            });
         }
         if let Some(i) = clicked {
             self.skel_sel = SkelSel::Part(i);

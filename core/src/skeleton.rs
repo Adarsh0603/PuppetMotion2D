@@ -216,6 +216,29 @@ impl Skeleton {
         order
     }
 
+    /// All parts depth-first as `(part, depth)`, each child listed right under
+    /// its parent: the order for showing the hierarchy as an indented tree.
+    pub fn tree_order(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::with_capacity(self.parts.len());
+        let mut seen = vec![false; self.parts.len()];
+        let mut stack: Vec<(usize, usize)> = (0..self.parts.len())
+            .rev()
+            .filter(|&i| self.parts[i].parent.is_none_or(|p| p >= self.parts.len()))
+            .map(|i| (i, 0))
+            .collect();
+        while let Some((p, depth)) = stack.pop() {
+            if std::mem::replace(&mut seen[p], true) {
+                continue;
+            }
+            out.push((p, depth));
+            let children: Vec<usize> = self.children(p).collect();
+            stack.extend(children.into_iter().rev().map(|c| (c, depth + 1)));
+        }
+        // Anything unreachable (only possible with a corrupted loop) goes last.
+        out.extend((0..self.parts.len()).filter(|&i| !seen[i]).map(|i| (i, 0)));
+        out
+    }
+
     /// Delete one joint and shift the joint indices stored in parts.
     fn drop_joint(&mut self, joint: usize) {
         self.joints.remove(joint);
@@ -477,6 +500,21 @@ mod tests {
         }
         assert!(sm.masks[1].get(60, 50) && sm.masks[1].get(25, 50), "head keeps the whole head");
         assert!(sm.masks[1].get(60, 13), "free end (head top) is still covered");
+    }
+
+    #[test]
+    fn tree_order_lists_children_under_their_parent() {
+        let s = Skeleton::person_front(RectI::new(0, 0, 100, 200));
+        let tree = s.tree_order();
+        assert_eq!(tree.len(), s.parts.len());
+        assert_eq!(tree[0], (1, 0), "torso is the root");
+        for (k, &(p, depth)) in tree.iter().enumerate() {
+            if let Some(parent) = s.parts[p].parent {
+                let pk = tree.iter().position(|&(q, _)| q == parent).unwrap();
+                assert!(pk < k && tree[pk].1 + 1 == depth);
+                assert!(tree[pk + 1..k].iter().all(|&(_, d)| d >= depth), "child sits inside its parent's subtree");
+            }
+        }
     }
 
     #[test]
