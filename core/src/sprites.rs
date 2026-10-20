@@ -6,7 +6,7 @@
 //! like the round joints of a paper cut-out puppet.
 
 use crate::mask::Mask;
-use crate::skeleton::{Skeleton, distance_transform};
+use crate::skeleton::Skeleton;
 use image::RgbaImage;
 
 /// Disc radius never drops below this (px), so thin limbs still get a joint.
@@ -26,13 +26,12 @@ pub struct Sprite {
 /// Each part's mask plus the joint-overlap discs it keeps for its children.
 /// A disc's radius is the drawing's half-thickness right at the joint (so a
 /// big head on a thin neck gets a neck-sized disc, not a head-sized one),
-/// scaled by `overlap` (0 = no discs).
-pub fn sprite_masks(fg: &Mask, skel: &Skeleton, masks: &[Mask], overlap: f32) -> Vec<Mask> {
+/// scaled by `overlap` (0 = no discs). `dt` is `distance_transform(fg)`.
+pub fn sprite_masks(fg: &Mask, dt: &[f32], skel: &Skeleton, masks: &[Mask], overlap: f32) -> Vec<Mask> {
     let mut out = masks.to_vec();
     if overlap <= 0.0 {
         return out;
     }
-    let dt = distance_transform(fg);
     let thickness_at = |p: [f32; 2]| {
         let (x, y) = (p[0].clamp(0.0, (fg.w - 1) as f32) as usize, p[1].clamp(0.0, (fg.h - 1) as f32) as usize);
         dt[y * fg.w as usize + x]
@@ -56,15 +55,16 @@ pub fn sprite_masks(fg: &Mask, skel: &Skeleton, masks: &[Mask], overlap: f32) ->
 }
 
 /// Cut `img` into one sprite per part. `masks` come from `skeleton_masks`;
-/// `fg` is the whole-figure mask.
+/// `fg` is the whole-figure mask and `dt` its `distance_transform`.
 pub fn build_sprites(
     img: &RgbaImage,
     fg: &Mask,
+    dt: &[f32],
     skel: &Skeleton,
     masks: &[Mask],
     overlap: f32,
 ) -> Vec<Sprite> {
-    sprite_masks(fg, skel, masks, overlap)
+    sprite_masks(fg, dt, skel, masks, overlap)
         .iter()
         .enumerate()
         .map(|(part, m)| {
@@ -87,7 +87,7 @@ pub fn build_sprites(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skeleton::{Joint, SkelPart, skeleton_masks};
+    use crate::skeleton::{Joint, SkelPart, distance_transform, skeleton_masks};
     use image::Rgba;
 
     /// Torso block with an arm sticking out of its top-left, in two colors.
@@ -119,7 +119,7 @@ mod tests {
     fn rest_pose_reassembles_the_drawing() {
         let (img, fg, skel) = figure();
         let sm = skeleton_masks(&fg, &skel);
-        let sprites = build_sprites(&img, &fg, &skel, &sm.masks, 1.0);
+        let sprites = build_sprites(&img, &fg, &distance_transform(&fg), &skel, &sm.masks, 1.0);
         let mut out = RgbaImage::new(120, 120);
         for p in skel.draw_order() {
             let s = &sprites[p];
@@ -146,11 +146,11 @@ mod tests {
         // An arm pixel just outside the torso, right at the shoulder joint.
         let (x, y) = (38u32, 26u32);
         assert!(sm.masks[1].get(x, y) && !sm.masks[0].get(x, y));
-        let with = sprite_masks(&fg, &skel, &sm.masks, 1.0);
+        let with = sprite_masks(&fg, &distance_transform(&fg), &skel, &sm.masks, 1.0);
         assert!(with[0].get(x, y), "torso keeps a disc around the shoulder");
         assert!(with[1].get(x, y), "arm still has it");
         assert_eq!(with[1], sm.masks[1], "child mask unchanged");
-        let without = sprite_masks(&fg, &skel, &sm.masks, 0.0);
+        let without = sprite_masks(&fg, &distance_transform(&fg), &skel, &sm.masks, 0.0);
         assert!(!without[0].get(x, y));
     }
 
@@ -175,7 +175,7 @@ mod tests {
             ],
         };
         let sm = skeleton_masks(&fg, &skel);
-        let with = sprite_masks(&fg, &skel, &sm.masks, 1.0);
+        let with = sprite_masks(&fg, &distance_transform(&fg), &skel, &sm.masks, 1.0);
         assert!(with[0].get(60, 85), "torso keeps a little of the head right above the neck");
         assert!(!with[0].get(40, 70) && !with[0].get(60, 60), "but not a head-sized chunk");
     }

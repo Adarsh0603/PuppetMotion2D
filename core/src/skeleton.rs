@@ -371,22 +371,60 @@ fn bone_radius(dt: &[f32], w: u32, h: u32, a: [f32; 2], b: [f32; 2]) -> f32 {
     samples[samples.len() / 2]
 }
 
+/// "No part here" in `SkeletonMasks::labels` (a background pixel).
+pub const NO_PART: u16 = u16::MAX;
+
 pub struct SkeletonMasks {
     /// One mask per part, in `Skeleton::parts` order. Exclusive and covering
     /// every foreground pixel.
     pub masks: Vec<Mask>,
     /// Measured thickness (half-width, px) of each part.
     pub radii: Vec<f32>,
+    /// The same split as one map: each pixel's part number, or `NO_PART`.
+    pub labels: Vec<u16>,
 }
 
+/// Split the character into parts. Works out the edge-distance map itself;
+/// use `skeleton_masks_with_dt` when it's already known (it only changes with `fg`).
 pub fn skeleton_masks(fg: &Mask, skel: &Skeleton) -> SkeletonMasks {
-    let dt = distance_transform(fg);
-    let bones: Vec<_> = (0..skel.parts.len()).map(|i| skel.bone(i)).collect();
-    let radii: Vec<f32> = bones.iter().map(|&(a, b)| bone_radius(&dt, fg.w, fg.h, a, b)).collect();
-    let mut masks = vec![Mask::new(fg.w, fg.h); skel.parts.len()];
-    if bones.is_empty() {
-        return SkeletonMasks { masks, radii };
+    skeleton_masks_with_dt(fg, &distance_transform(fg), skel)
+}
+
+/// `skeleton_masks` with the character's edge-distance map (`distance_transform(fg)`)
+/// passed in.
+pub fn skeleton_masks_with_dt(fg: &Mask, dt: &[f32], skel: &Skeleton) -> SkeletonMasks {
+    let mut labels = Vec::new();
+    let radii = part_labels(fg, dt, fg.bbox(), skel, &mut labels);
+    let masks = masks_from_labels(&labels, fg.w, fg.h, skel.parts.len());
+    SkeletonMasks { masks, radii, labels }
+}
+
+/// One mask per part from a part-per-pixel map (see `part_labels`).
+pub fn masks_from_labels(labels: &[u16], w: u32, h: u32, parts: usize) -> Vec<Mask> {
+    let mut masks = vec![Mask::new(w, h); parts];
+    for (i, &l) in labels.iter().enumerate() {
+        if let Some(m) = masks.get_mut(l as usize) {
+            m.data[i] = 255;
+        }
     }
+    masks
+}
+
+/// The part split as a map: writes each foreground pixel's part number
+/// (`NO_PART` elsewhere) into `labels`, reusing its memory, and returns each
+/// part's measured thickness. This is the per-joint-move work, so it takes
+/// what doesn't change with the joints from the caller: the edge-distance
+/// map `dt` and the character's bounding box `bbox`. Only that box is
+/// scanned, spread over the CPU cores.
+pub fn part_labels(fg: &Mask, dt: &[f32], bbox: Option<RectI>, skel: &Skeleton, labels: &mut Vec<u16>) -> Vec<f32> {
+    let bones: Vec<_> = (0..skel.parts.len()).map(|i| skel.bone(i)).collect();
+    let radii: Vec<f32> = bones.iter().map(|&(a, b)| bone_radius(dt, fg.w, fg.h, a, b)).collect();
+    let (w, h) = (fg.w as usize, fg.h as usize);
+    labels.clear();
+    labels.resize(w * h, NO_PART);
+    let Some(bb) = bbox.filter(|_| !bones.is_empty()) else {
+        return radii;
+    };
     // A part stops dead at a joint where it meets another part, like a paper
     // cut-out cut straight across: at its pivot if it hangs from a parent, and
     // at its tip if other parts hang from that joint. Only free ends (a hand,
@@ -395,26 +433,43 @@ pub fn skeleton_masks(fg: &Mask, skel: &Skeleton) -> SkeletonMasks {
     // would take the top of the torso and swing it around when posed).
     let cut_at_pivot: Vec<bool> = skel.parts.iter().map(|p| p.parent.is_some()).collect();
     let cut_at_tip: Vec<bool> = skel.parts.iter().map(|p| skel.parts.iter().any(|q| q.pivot == p.tip)).collect();
-    for y in 0..fg.h {
-        for x in 0..fg.w {
-            if !fg.get(x, y) {
+    let (x0, x1) = (bb.x.max(0) as usize, (bb.right().max(0) as usize).min(w));
+    let rows = bb.y.max(0) as usize..(bb.bottom().max(0) as usize).min(h);
+    crate::par::for_rows(labels, w, rows, |y, row| {
+        // Each bone's distance once per pixel: capsule edge, and the cost with the joint cuts.
+        let mut capsule = vec![0.0f32; bones.len()];
+        let mut cost = vec![0.0f32; bones.len()];
+        for (x, out) in row.iter_mut().enumerate().take(x1).skip(x0) {
+            if fg.data[y * w + x] == 0 {
                 continue;
             }
             let p = [x as f32 + 0.5, y as f32 + 0.5];
-            let capsule = |i: usize| dist_to_segment(p, bones[i].0, bones[i].1) - radii[i];
-            let cost = |i: usize| {
-                let t = along(p, bones[i].0, bones[i].1);
-                if (t < 0.0 && cut_at_pivot[i]) || (t > 1.0 && cut_at_tip[i]) { f32::INFINITY } else { capsule(i) }
-            };
-            let mut best = (0..bones.len()).min_by(|&a, &b| cost(a).total_cmp(&cost(b))).unwrap();
-            if cost(best).is_infinite() {
-                // Outside every part's span (e.g. a stray blob): nearest capsule wins.
-                best = (0..bones.len()).min_by(|&a, &b| capsule(a).total_cmp(&capsule(b))).unwrap();
+            for (i, &(a, b)) in bones.iter().enumerate() {
+                capsule[i] = dist_to_segment(p, a, b) - radii[i];
+                let t = along(p, a, b);
+                let cut = (t < 0.0 && cut_at_pivot[i]) || (t > 1.0 && cut_at_tip[i]);
+                cost[i] = if cut { f32::INFINITY } else { capsule[i] };
             }
-            masks[best].set(x, y, true);
+            let mut best = first_min(&cost);
+            if cost[best].is_infinite() {
+                // Outside every part's span (e.g. a stray blob): nearest capsule wins.
+                best = first_min(&capsule);
+            }
+            *out = best as u16;
+        }
+    });
+    radii
+}
+
+/// Index of the smallest value (the first one, on a tie).
+fn first_min(v: &[f32]) -> usize {
+    let mut best = 0;
+    for i in 1..v.len() {
+        if v[i].total_cmp(&v[best]).is_lt() {
+            best = i;
         }
     }
-    SkeletonMasks { masks, radii }
+    best
 }
 
 /// Where `p` falls along the bone a→b: 0 at `a`, 1 at `b`, outside [0, 1]
@@ -470,6 +525,11 @@ mod tests {
         let total: usize = sm.masks.iter().map(Mask::count).sum();
         assert_eq!(total, fg.count());
         assert_eq!(sm.masks[0].and(&sm.masks[1]).count(), 0);
+        // The part-per-pixel map says the same thing as the masks.
+        for (i, &l) in sm.labels.iter().enumerate() {
+            let owners: Vec<usize> = (0..2).filter(|&p| sm.masks[p].data[i] != 0).collect();
+            assert_eq!(owners, if l == NO_PART { vec![] } else { vec![l as usize] });
+        }
     }
 
     #[test]

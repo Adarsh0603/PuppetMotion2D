@@ -4,7 +4,7 @@ use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
     Clip, Ease, History, KeyRef, Template, Toward, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
-    foreground_mask, load_project, project, save_project, skeleton_masks,
+    NO_PART, distance_transform, foreground_mask, load_project, project, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
@@ -108,9 +108,19 @@ pub struct Doc {
     pub image: RgbaImage,
     pub texture: TextureHandle,
     pub fg: Mask,
+    /// `distance_transform(fg)`, kept because it only changes with `fg` and
+    /// every joint move needs it. Change `fg` through `set_fg`.
+    pub dt: Vec<f32>,
+    /// The cutout settings `fg` was found with.
+    pub fg_params: Params,
+    /// `fg.bbox()`, kept for the same reason as `dt`.
+    pub fg_box: Option<RectI>,
     pub skeleton: Skeleton,
-    /// Per-part masks from the skeleton.
+    /// Per-part masks, built from `skel_labels` when the sprites are rebuilt.
     pub skel_masks: Vec<Mask>,
+    /// The same split as one part-number-per-pixel map (`NO_PART` = background),
+    /// which the Rig overlay is painted from in one pass.
+    pub skel_labels: Vec<u16>,
     pub overlay: Option<TextureHandle>,
     pub overlay_dirty: bool,
     pub history: History<Snapshot>,
@@ -159,10 +169,22 @@ impl Doc {
         egui::vec2(self.image.width() as f32, self.image.height() as f32)
     }
 
+    /// Re-split the character into parts after the joints or the cutout
+    /// changed. Runs every frame of a joint drag, so it only updates the
+    /// part map; the per-part masks are built when the sprites need them.
     pub fn recompute_skeleton(&mut self) {
-        self.skel_masks = skeleton_masks(&self.fg, &self.skeleton).masks;
+        part_labels(&self.fg, &self.dt, self.fg_box, &self.skeleton, &mut self.skel_labels);
         self.overlay_dirty = true;
         self.sprites_dirty = true;
+    }
+
+    /// Find the character again with `params` (after the cutout settings change).
+    pub fn set_fg(&mut self, params: &Params) {
+        self.fg = foreground_mask(&self.image, params);
+        self.dt = distance_transform(&self.fg);
+        self.fg_box = self.fg.bbox();
+        self.fg_params = *params;
+        self.recompute_skeleton();
     }
 
     /// The character's bounding box (the whole image if nothing was found).
@@ -379,14 +401,20 @@ impl AppState {
         }
         let texture = ctx.load_texture("drawing", to_color_image(&image), TextureOptions::LINEAR);
         let fg = foreground_mask(&image, &self.params);
+        let dt = distance_transform(&fg);
+        let fg_box = fg.bbox();
         self.status = format!("Opened {name} ({}×{})", image.width(), image.height());
         let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy().into_owned();
         Some(Doc {
             image,
             texture,
             fg,
+            fg_box,
+            dt,
+            fg_params: self.params,
             skeleton: Skeleton::empty(),
             skel_masks: Vec::new(),
+            skel_labels: Vec::new(),
             overlay: None,
             overlay_dirty: true,
             history: History::new(UNDO_LIMIT),
@@ -820,7 +848,8 @@ impl AppState {
             return;
         }
         doc.sprites_dirty = false;
-        doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.skeleton, &doc.skel_masks, self.overlap);
+        doc.skel_masks = masks_from_labels(&doc.skel_labels, doc.fg.w, doc.fg.h, doc.skeleton.parts.len());
+        doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap);
         doc.sprite_tex = doc
             .sprites
             .iter()
@@ -866,18 +895,38 @@ impl AppState {
             return;
         }
         doc.overlay_dirty = false;
-        let mut img = RgbaImage::new(doc.image.width(), doc.image.height());
+        // Painted straight into egui's pixel format, one pass over the image
+        // spread across the CPU cores (a joint drag repaints it every frame).
+        let (w, h) = (doc.image.width() as usize, doc.image.height() as usize);
+        let mut pixels = vec![Color32::TRANSPARENT; w * h];
         match self.step {
-            Step::Review => doc.fg.inverted().paint_onto(&mut img, [30, 30, 36, 210]),
-            Step::Rig if self.show_parts => {
-                for (i, m) in doc.skel_masks.iter().enumerate() {
-                    let [r, g, b] = PALETTE[i % PALETTE.len()];
-                    m.paint_onto(&mut img, [r, g, b, 140]);
-                }
+            Step::Review => {
+                let dim = Color32::from_rgba_unmultiplied(30, 30, 36, 210);
+                let fg = &doc.fg.data;
+                anim_core::par::for_rows(&mut pixels, w, 0..h, |y, row| {
+                    for (x, px) in row.iter_mut().enumerate() {
+                        if fg[y * w + x] == 0 {
+                            *px = dim;
+                        }
+                    }
+                });
+            }
+            Step::Rig if self.show_parts && doc.skel_labels.len() == w * h => {
+                let tints: Vec<Color32> =
+                    PALETTE.iter().map(|&[r, g, b]| Color32::from_rgba_unmultiplied(r, g, b, 140)).collect();
+                let labels = &doc.skel_labels;
+                anim_core::par::for_rows(&mut pixels, w, 0..h, |y, row| {
+                    for (x, px) in row.iter_mut().enumerate() {
+                        let l = labels[y * w + x];
+                        if l != NO_PART {
+                            *px = tints[l as usize % tints.len()];
+                        }
+                    }
+                });
             }
             _ => {}
         }
-        let color = to_color_image(&img);
+        let color = ColorImage::new([w, h], pixels);
         match &mut doc.overlay {
             Some(tex) => tex.set(color, TextureOptions::NEAREST),
             None => doc.overlay = Some(ctx.load_texture("overlay", color, TextureOptions::NEAREST)),
@@ -976,26 +1025,45 @@ impl AppState {
                     .weak(),
             );
         });
-        let before = self.params;
+        // Finding the character is slow on big drawings, so a slider applies
+        // when it's let go (or typed into), not on every frame of the drag.
+        let mut apply = false;
         fold(ui, "Fine-tune cutout", |ui| {
-            ui.add(egui::Slider::new(&mut self.params.threshold, 5.0..=150.0).text("background tolerance"))
-                .on_hover_text("How different from the background a colour must be to count as the character");
-            ui.add(egui::Slider::new(&mut self.params.gap_close, 0..=20).text("close outline gaps (px)"))
-                .on_hover_text("Seals small breaks in a sketchy outline so the background can't leak inside");
-            ui.add(egui::Slider::new(&mut self.params.min_area, 0..=5000).logarithmic(true).text("ignore specks under (px)"))
-                .on_hover_text("Drops tiny dots of dirt or noise");
-            ui.add(egui::Slider::new(&mut self.params.corner_patch, 2..=64).text("corner sample (px)"))
-                .on_hover_text("The background colour is read from squares this size in each corner");
+            let mut slider = |ui: &mut egui::Ui, s: egui::Slider, hint: &str| {
+                let r = ui.add(s).on_hover_text(hint);
+                apply |= r.drag_stopped() || (r.changed() && !r.dragged());
+            };
+            slider(
+                ui,
+                egui::Slider::new(&mut self.params.threshold, 5.0..=150.0).text("background tolerance"),
+                "How different from the background a colour must be to count as the character",
+            );
+            slider(
+                ui,
+                egui::Slider::new(&mut self.params.gap_close, 0..=20).text("close outline gaps (px)"),
+                "Seals small breaks in a sketchy outline so the background can't leak inside",
+            );
+            slider(
+                ui,
+                egui::Slider::new(&mut self.params.min_area, 0..=5000).logarithmic(true).text("ignore specks under (px)"),
+                "Drops tiny dots of dirt or noise",
+            );
+            slider(
+                ui,
+                egui::Slider::new(&mut self.params.corner_patch, 2..=64).text("corner sample (px)"),
+                "The background colour is read from squares this size in each corner",
+            );
             if ui.button("Reset").clicked() {
                 self.params = Params::default();
+                apply = true;
             }
         });
-        if self.params != before
+        if apply
             && let Some(doc) = &mut self.doc
+            && doc.fg_params != self.params
         {
-            doc.fg = foreground_mask(&doc.image, &self.params);
+            doc.set_fg(&self.params);
             doc.dirty = true;
-            doc.recompute_skeleton();
         }
     }
 
@@ -1396,6 +1464,11 @@ mod tests {
         state
     }
 
+    /// How many parts the part map uses (highest part number + 1).
+    fn parts_in_map(doc: &Doc) -> usize {
+        doc.skel_labels.iter().filter(|&&l| l != NO_PART).map(|&l| l as usize + 1).max().unwrap_or(0)
+    }
+
     fn bone_count(state: &AppState) -> usize {
         state.doc.as_ref().unwrap().skeleton.parts.len()
     }
@@ -1414,7 +1487,7 @@ mod tests {
         state.skel_sel = SkelSel::Part(0);
         state.delete_skel_selection();
         assert_eq!(bone_count(&state), 10);
-        assert_eq!(state.doc.as_ref().unwrap().skel_masks.len(), 10, "masks follow the skeleton");
+        assert_eq!(parts_in_map(state.doc.as_ref().unwrap()), 10, "the part split follows the skeleton");
 
         state.undo();
         assert_eq!(bone_count(&state), 11, "head is back");
@@ -1485,7 +1558,7 @@ mod tests {
         assert_eq!(b.image_bytes, a.image_bytes, "image stored byte for byte");
         assert_eq!(fresh.params.gap_close, 5);
         assert_eq!(fresh.overlap, 0.6);
-        assert_eq!(b.skel_masks.len(), 10, "masks recomputed on open");
+        assert_eq!(parts_in_map(b), 10, "parts split again on open");
         assert!(!b.dirty && b.project_path.as_deref() == Some(path.as_path()));
         std::fs::remove_file(&path).unwrap();
     }
