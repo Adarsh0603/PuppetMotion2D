@@ -6,6 +6,7 @@ mod canvas;
 mod export;
 mod state;
 mod timeline;
+mod unsaved;
 
 use eframe::egui;
 use state::AppState;
@@ -27,6 +28,8 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let mut app = App { state: AppState::default(), title: String::new() };
+            // Offer back anything a crash left unsaved.
+            app.state.unsaved.find_recovery();
             if let Some(path) = initial {
                 app.state.open(&cc.egui_ctx, &path);
             }
@@ -45,7 +48,8 @@ impl App {
     /// Global keys: undo/redo, save, open. Skipped while a text box has focus
     /// (it has its own undo) and mid-drag (the drag's undo step isn't recorded yet).
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if ctx.text_edit_focused() {
+        // Nothing behind a question box ("Save changes?", "Recover?") reacts to keys.
+        if ctx.text_edit_focused() || self.state.unsaved.prompt.is_some() || self.state.unsaved.recovery.is_some() {
             return;
         }
         if self.state.field_before.is_some() && !ctx.egui_is_using_pointer() {
@@ -74,7 +78,7 @@ impl App {
             self.state.save();
         }
         if pressed(ctx, Modifiers::COMMAND, Key::O) {
-            self.state.open_dialog(ctx);
+            self.state.request_open_dialog(ctx);
         }
         if self.state.step == state::Step::Animate {
             self.key_shortcuts(ctx);
@@ -143,12 +147,14 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
         if let Some(path) = dropped {
-            self.state.open(&ctx, &path);
+            self.state.request_open(&ctx, &path);
         }
         self.shortcuts(&ctx);
         self.state.tick(&ctx);
 
         export::poll(&ctx, &mut self.state);
+        unsaved::handle_close(&ctx, &mut self.state);
+        unsaved::autosave(&mut self.state);
 
         egui::Panel::top("steps").show(ui, |ui| {
             ui.add_space(4.0);
@@ -169,6 +175,8 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             canvas::show(ui, &mut self.state);
         });
+        unsaved::show_prompt(&ctx, &mut self.state);
+        unsaved::show_recovery(&ctx, &mut self.state);
 
         let title = self.state.title();
         if title != self.title {

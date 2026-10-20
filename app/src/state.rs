@@ -1,5 +1,6 @@
 use crate::canvas::{Drag, View};
 use crate::export::ExportUi;
+use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
     Clip, Ease, History, KeyRef, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
     foreground_mask, load_project, project, save_project, skeleton_masks,
@@ -220,6 +221,8 @@ pub struct AppState {
     pub fit_pending: bool,
     /// Export settings and any export in progress.
     pub export: ExportUi,
+    /// The "Save changes?" prompt, autosave, and crash recovery.
+    pub unsaved: Unsaved,
 }
 
 impl Default for AppState {
@@ -251,6 +254,7 @@ impl Default for AppState {
             status: "Open or drop a drawing to start.".into(),
             fit_pending: false,
             export: ExportUi::default(),
+            unsaved: Unsaved::new(crate::unsaved::recovery_dir()),
         }
     }
 }
@@ -638,9 +642,10 @@ impl AppState {
         self.save_to(&path);
     }
 
-    pub fn save_to(&mut self, path: &Path) {
-        let Some(doc) = &mut self.doc else { return };
-        let data = ProjectData {
+    /// What a saved project holds for the open drawing.
+    pub fn project_data(&self) -> Option<ProjectData> {
+        let doc = self.doc.as_ref()?;
+        Some(ProjectData {
             format_version: project::FORMAT_VERSION,
             image_name: format!("{}.{}", doc.name, doc.image_ext),
             params: self.params,
@@ -648,15 +653,40 @@ impl AppState {
             pose: doc.pose.clone(),
             overlap: self.overlap,
             motion: doc.motion.clone(),
-        };
+        })
+    }
+
+    pub fn save_to(&mut self, path: &Path) {
+        let Some(data) = self.project_data() else { return };
+        let Some(doc) = &mut self.doc else { return };
         self.status = match save_project(path, &data, &doc.image_bytes, &doc.image_ext) {
             Ok(()) => {
                 doc.project_path = Some(path.to_path_buf());
                 doc.dirty = false;
+                // Saved for real, so the crash-recovery copy isn't needed any more.
+                self.unsaved.clear_recovery();
                 format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy())
             }
             Err(e) => format!("Save failed: {e}"),
         };
+    }
+
+    /// Open `path`, first asking to save if the current drawing has unsaved changes.
+    pub fn request_open(&mut self, ctx: &egui::Context, path: &Path) {
+        if self.doc.as_ref().is_some_and(|d| d.dirty) {
+            self.unsaved.prompt = Some(Pending::Open(path.to_path_buf()));
+        } else {
+            self.open(ctx, path);
+        }
+    }
+
+    /// Show the Open dialog, first asking to save if there are unsaved changes.
+    pub fn request_open_dialog(&mut self, ctx: &egui::Context) {
+        if self.doc.as_ref().is_some_and(|d| d.dirty) {
+            self.unsaved.prompt = Some(Pending::OpenDialog);
+        } else {
+            self.open_dialog(ctx);
+        }
     }
 
     pub fn open_dialog(&mut self, ctx: &egui::Context) {
@@ -814,7 +844,7 @@ impl AppState {
         ui.horizontal(|ui| {
             let has_doc = self.doc.is_some();
             if ui.button("Open…").on_hover_text("A drawing or a project (Ctrl+O)").clicked() {
-                self.open_dialog(ui.ctx());
+                self.request_open_dialog(ui.ctx());
             }
             if ui.add_enabled(has_doc, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked() {
                 self.save();
@@ -880,7 +910,7 @@ impl AppState {
             ui.add_space(6.0);
             let open = egui::Button::new(egui::RichText::new("Open a drawing…").size(15.0).strong());
             if ui.add(open.min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                self.open_dialog(ui.ctx());
+                self.request_open_dialog(ui.ctx());
             }
             ui.add_space(4.0);
             ui.label(egui::RichText::new("Or drop a file on the window. Saved projects (.pm2d) open the same way.").weak());
