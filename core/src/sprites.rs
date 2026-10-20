@@ -14,6 +14,7 @@ use std::path::Path;
 /// Disc radius never drops below this (px), so thin limbs still get a joint.
 const MIN_DISC_RADIUS: f32 = 3.0;
 
+#[derive(Clone)]
 pub struct Sprite {
     pub part: usize,
     /// Cropped pixels; transparent outside the part. Empty (0×0) if the part has no pixels.

@@ -87,6 +87,7 @@ fn corners(r: &RectI) -> [Pos2; 4] {
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
     let canvas = response.rect;
+    state.canvas_rect = canvas;
     painter.rect_filled(canvas, 0.0, Color32::from_gray(40));
 
     let Some(image_size) = state.doc.as_ref().map(|d| d.size()) else {

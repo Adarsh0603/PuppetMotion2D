@@ -208,6 +208,7 @@ name = "anim-app"
 version = "0.1.0"
 dependencies = [
  "anim-core",
+ "anim-export",
  "eframe",
  "image",
  "rfd",
@@ -227,6 +228,11 @@ dependencies = [
 [[package]]
 name = "anim-export"
 version = "0.1.0"
+dependencies = [
+ "anim-core",
+ "gif",
+ "image",
+]
 
 [[package]]
 name = "anyhow"

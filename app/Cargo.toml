@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anim-core = { version = "0.1.0", path = "../core" }
+anim-export = { version = "0.1.0", path = "../export" }
 eframe = "0.37.0"
 image = "0.25.10"
 rfd = "0.17.2"

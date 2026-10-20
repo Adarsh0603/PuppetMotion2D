@@ -1,4 +1,5 @@
 use crate::canvas::{Drag, View};
+use crate::export::ExportUi;
 use anim_core::{
 
     Axis, Clip, History, KeyRef, Mask, Motion, Params, PartBox, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, foreground_mask,
@@ -213,6 +214,10 @@ pub struct AppState {
     pub status: String,
     /// Set when a new image is loaded so the canvas fits it on the next frame.
     pub fit_pending: bool,
+    /// The "Export animation" window and any export in progress.
+    pub export: ExportUi,
+    /// Screen area of the canvas last frame (for centering windows on it).
+    pub canvas_rect: egui::Rect,
 }
 
 impl Default for AppState {
@@ -248,6 +253,8 @@ impl Default for AppState {
             show_bones: true,
             status: "Open or drop an image to start.".into(),
             fit_pending: false,
+            export: ExportUi::default(),
+            canvas_rect: egui::Rect::NOTHING,
         }
     }
 }
@@ -850,9 +857,14 @@ impl AppState {
         ui.checkbox(&mut self.ik, "IK: drag a hand or foot to move the whole limb");
         ui.checkbox(&mut self.show_bones, "Show bones").on_hover_text("B: hide them to watch just the animation");
         ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
-        if ui.button("Export parts…").on_hover_text("One PNG per part plus rig.json").clicked() {
-            self.export_parts(ui.ctx());
-        }
+        ui.horizontal(|ui| {
+            if ui.button("Export animation…").on_hover_text("Render the motion as a GIF or a PNG sequence").clicked() {
+                self.export.open = true;
+            }
+            if ui.button("Export parts…").on_hover_text("One PNG per part plus rig.json").clicked() {
+                self.export_parts(ui.ctx());
+            }
+        });
         ui.separator();
         ui.small(
             "Drag a hand or foot: the whole limb follows (IK)\n\

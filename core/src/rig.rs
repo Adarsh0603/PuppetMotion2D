@@ -39,6 +39,18 @@ impl Affine2 {
         [a * p[0] + b * p[1] + tx, c * p[0] + d * p[1] + ty]
     }
 
+    /// The transform that undoes this one (identity if it can't be undone,
+    /// which rotations and translations never are).
+    pub fn inverse(&self) -> Affine2 {
+        let [a, b, c, d, tx, ty] = self.m;
+        let det = a * d - b * c;
+        if det.abs() < 1e-12 {
+            return Affine2::IDENTITY;
+        }
+        let (ia, ib, ic, id) = (d / det, -b / det, -c / det, a / det);
+        Affine2 { m: [ia, ib, ic, id, -(ia * tx + ib * ty), -(ic * tx + id * ty)] }
+    }
+
     /// Transform a direction (ignores translation).
     pub fn apply_vec(&self, v: [f32; 2]) -> [f32; 2] {
         let [a, b, c, d, ..] = self.m;
@@ -251,6 +263,14 @@ mod tests {
 
     fn close(a: [f32; 2], b: [f32; 2]) -> bool {
         (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
+    }
+
+    #[test]
+    fn inverse_undoes_the_transform() {
+        let t = Affine2::translate([5.0, -3.0]).mul(&Affine2::rotate_about([10.0, 10.0], 0.7));
+        let p = [12.0, 34.0];
+        assert!(close(t.inverse().apply(t.apply(p)), p));
+        assert!(close(t.apply(t.inverse().apply(p)), p));
     }
 
     #[test]

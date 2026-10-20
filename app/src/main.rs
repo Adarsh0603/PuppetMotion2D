@@ -3,6 +3,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod canvas;
+mod export;
 mod state;
 mod timeline;
 
@@ -144,6 +145,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             canvas::show(ui, &mut self.state);
         });
+        export::show(&ctx, &mut self.state);
 
         let title = self.state.title();
         if title != self.title {
