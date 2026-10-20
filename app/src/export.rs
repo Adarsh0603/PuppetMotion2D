@@ -47,6 +47,10 @@ pub fn show(ctx: &egui::Context, state: &mut AppState) {
     if !showing {
         return;
     }
+    if just_opened && state.export.running.is_none() {
+        // Start from the timeline's frame rate, so the export matches what was animated.
+        state.export.settings.fps = state.doc.as_ref().unwrap().motion.fps;
+    }
     state.refresh_sprites(ctx);
     let mut open = state.export.open;
     let mut start = false;

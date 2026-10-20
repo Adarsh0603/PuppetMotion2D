@@ -4,7 +4,7 @@
 //! Shift+click to add to the selection, click empty space to move the playhead.
 
 use crate::state::{AppState, box_color};
-use anim_core::motion::KEY_EPSILON;
+use anim_core::motion::{KEY_EPSILON, MAX_FPS};
 use anim_core::{KeyRef, Motion, TrackId};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 
@@ -27,7 +27,6 @@ enum Lane {
 pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(doc) = &state.doc else { return };
     let duration = doc.motion.duration;
-    let on_key = !doc.motion.keys_at(state.playhead).is_empty();
     let selected = state.key_sel.len();
 
     ui.horizontal(|ui| {
@@ -41,7 +40,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         if ui.button("⏭").on_hover_text("Next key").clicked() {
             state.jump_key(1);
         }
-        ui.monospace(format!("{:5.2} s / {:.2} s", state.playhead, duration));
+        if ui.button("◀").on_hover_text("Previous frame ( , )").clicked() {
+            state.step_frame(-1);
+        }
+        if ui.button("▶").on_hover_text("Next frame ( . )").clicked() {
+            state.step_frame(1);
+        }
+        let m = &state.doc.as_ref().unwrap().motion;
+        let (frame, frames) = (m.frame_at(state.playhead), m.frame_at(duration));
+        ui.monospace(format!("frame {frame:>3} / {frames}  {:5.2} s", state.playhead));
         ui.separator();
         // Record button: when on, every pose drag is saved as keys right away.
         let rec_color = if state.auto_key { Color32::from_rgb(255, 80, 80) } else { Color32::GRAY };
@@ -53,14 +60,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         {
             state.auto_key = !state.auto_key;
         }
-        if ui.button("Key pose").on_hover_text("K: save the current pose at the playhead").clicked() {
-            state.key_pose();
-        }
         if ui.button("Key all").on_hover_text("Pin every part's current angle at this time").clicked() {
             state.key_all();
-        }
-        if ui.add_enabled(on_key, egui::Button::new("Delete keys here")).clicked() {
-            state.delete_keys_here();
         }
         ui.separator();
         if ui.add_enabled(selected > 0, egui::Button::new("Copy")).on_hover_text("Ctrl+C").clicked() {
@@ -70,18 +71,24 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         if ui.add_enabled(can_paste, egui::Button::new("Paste")).on_hover_text("Ctrl+V: at the playhead").clicked() {
             state.paste_keys(None);
         }
-        if ui.add_enabled(selected > 0, egui::Button::new("Delete")).on_hover_text("Delete key").clicked() {
+        if ui.add_enabled(selected > 0, egui::Button::new("Delete")).on_hover_text("Delete: remove the selected keys\nCtrl+A: select every key").clicked() {
             state.delete_selected_keys();
         }
         if selected > 0 {
             ui.label(format!("{selected} selected"));
         }
+        // Only there when a pose was changed with auto-key off and isn't saved yet.
         if state.unkeyed_pose {
-            ui.label(egui::RichText::new("● unkeyed pose: K to keep it").color(Color32::from_rgb(255, 170, 60)));
+            let keep = egui::Button::new(egui::RichText::new("● Keep pose (K)").color(Color32::BLACK).strong())
+                .fill(Color32::from_rgb(255, 170, 60));
+            if ui.add(keep).on_hover_text("Save the parts you changed as keys at this frame.\nMove the playhead or play to discard them.").clicked() {
+                state.key_pose();
+            }
         }
         ui.separator();
         ui.label("Length");
         length_editor(ui, state);
+        fps_editor(ui, state);
         ui.checkbox(&mut state.looping, "Loop");
     });
 
@@ -154,6 +161,7 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     let inner = bar.shrink2(vec2(8.0, 0.0));
     let x_of = |t: f32| inner.left() + inner.width() * (t / duration).clamp(0.0, 1.0);
     let t_of = |x: f32| ((x - inner.left()) / inner.width()).clamp(0.0, 1.0) * duration;
+    let snap = |t: f32| doc.motion.snap(t).min(doc.motion.duration);
 
     // Label and background.
     let (name, color) = match lane {
@@ -171,6 +179,14 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     );
     let shade = if row.is_multiple_of(2) { 38 } else { 33 };
     painter.rect_filled(bar, 0.0, Color32::from_gray(shade));
+    // Frame ticks, when they're far enough apart to read.
+    let frames = doc.motion.frame_at(duration);
+    if frames > 0 && inner.width() / frames as f32 >= 6.0 {
+        for f in 0..=frames {
+            let x = x_of(f as f32 * doc.motion.frame_len());
+            painter.line_segment([pos2(x, bar.bottom() - 4.0), pos2(x, bar.bottom())], Stroke::new(1.0, Color32::from_gray(60)));
+        }
+    }
     for s in 0..=duration.floor() as i32 {
         let x = x_of(s as f32);
         painter.line_segment([pos2(x, bar.top()), pos2(x, bar.bottom())], Stroke::new(1.0, Color32::from_gray(55)));
@@ -225,30 +241,32 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
                 if !shift {
                     state.key_sel.clear();
                 }
-                state.playhead = t_of(p.x);
+                state.playhead = snap(t_of(p.x));
             }
         }
         state.playing = false;
     } else if response.dragged()
         && let Some(p) = response.interact_pointer_pos()
     {
-        // Dragging anywhere on a row scrubs.
-        state.playhead = t_of(p.x);
+        // Dragging anywhere on a row scrubs, frame by frame.
+        state.playhead = snap(t_of(p.x));
         state.playing = false;
     }
 }
 
-/// Motion length in seconds. A whole drag of the value is one undo step.
+/// Motion length in seconds, moving a frame at a time. A whole drag of the
+/// value is one undo step.
 fn length_editor(ui: &mut egui::Ui, state: &mut AppState) {
     let before = state.snapshot();
     let Some(doc) = &mut state.doc else { return };
-    let last_key = doc.motion.key_times().last().copied().unwrap_or(0.0);
-    let r = ui.add(
-        egui::DragValue::new(&mut doc.motion.duration)
-            .range(last_key.max(0.1)..=600.0)
-            .speed(0.05)
-            .suffix(" s"),
-    );
+    let m = &mut doc.motion;
+    let last_key = m.key_times().last().copied().unwrap_or(0.0);
+    let frame = m.frame_len();
+    let min = last_key.max(frame);
+    let r = ui.add(egui::DragValue::new(&mut m.duration).range(min..=600.0).speed(frame).suffix(" s"));
+    if r.changed() {
+        m.duration = m.snap(m.duration).max(min);
+    }
     if (r.drag_started() || r.gained_focus()) && state.field_before.is_none() {
         state.field_before = before;
     }
@@ -257,6 +275,26 @@ fn length_editor(ui: &mut egui::Ui, state: &mut AppState) {
         state.commit(before);
     }
     state.playhead = state.playhead.min(state.doc.as_ref().unwrap().motion.duration);
+}
+
+/// Frames per second of the timeline grid (saved with the project). Keys stay
+/// where they are in seconds; only the playhead is put back on a frame.
+fn fps_editor(ui: &mut egui::Ui, state: &mut AppState) {
+    let before = state.snapshot();
+    let Some(doc) = &mut state.doc else { return };
+    let r = ui
+        .add(egui::DragValue::new(&mut doc.motion.fps).range(1..=MAX_FPS).speed(0.2).suffix(" fps"))
+        .on_hover_text("Frame rate: the timeline snaps to these frames, and export uses it by default");
+    if (r.drag_started() || r.gained_focus()) && state.field_before.is_none() {
+        state.field_before = before;
+    }
+    if r.changed() {
+        state.playhead = state.key_time();
+    }
+    if r.drag_stopped() || r.lost_focus() {
+        let before = state.field_before.take();
+        state.commit(before);
+    }
 }
 
 fn diamond(painter: &egui::Painter, c: Pos2, r: f32, fill: Color32, outline: Color32) {

@@ -460,8 +460,8 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
                     let joints = posed_joints(state);
                     let skel = &state.doc.as_ref().unwrap().skeleton;
                     let drag = hit_point(state, canvas, &joints, o).and_then(|j| pose_drag_for_joint(skel, j));
-                    if drag.is_some() {
-                        state.playing = false;
+                    if drag.is_some() && state.playing {
+                        state.pause();
                     }
                     drag.unwrap_or(Drag::None)
                 }

@@ -360,13 +360,14 @@ impl AppState {
     pub fn tick(&mut self, ctx: &egui::Context) {
         let Some(doc) = &mut self.doc else { return };
         if self.playing {
+            // The playhead runs on a smooth clock; the pose shown is held per frame (below).
             self.playhead += ctx.input(|i| i.stable_dt).min(0.1);
             let end = doc.motion.duration.max(0.01);
             if self.playhead >= end {
                 if self.looping {
                     self.playhead %= end;
                 } else {
-                    self.playhead = end;
+                    self.playhead = doc.motion.snap(end).min(end);
                     self.playing = false;
                 }
             }
@@ -381,9 +382,36 @@ impl AppState {
         // show the motion at the playhead (if there is one).
         let posing = matches!(self.drag, Drag::PoseRotate { .. } | Drag::PoseMove);
         if self.mode == Mode::Pose && !posing && !self.unkeyed_pose && !doc.motion.is_empty() {
-            doc.pose = doc.motion.sample(self.playhead, &doc.skeleton);
+            let t = if self.playing {
+                // Hold each frame until the next one starts, exactly like the export.
+                (self.playhead * doc.motion.fps.max(1) as f32).floor() / doc.motion.fps.max(1) as f32
+            } else {
+                self.playhead
+            };
+            doc.pose = doc.motion.sample(t, &doc.skeleton);
         }
         self.sampled_at = self.playhead;
+    }
+
+    /// The playhead on its nearest whole frame: where keys and pastes go.
+    pub fn key_time(&self) -> f32 {
+        self.doc.as_ref().map_or(self.playhead, |d| d.motion.snap(self.playhead))
+    }
+
+    /// Stop playback, leaving the playhead on the nearest frame.
+    pub fn pause(&mut self) {
+        self.playing = false;
+        self.playhead = self.key_time();
+    }
+
+    /// Move the playhead one frame back (`dir < 0`) or forward, pausing playback.
+    pub fn step_frame(&mut self, dir: i32) {
+        let Some(doc) = &self.doc else { return };
+        let (frame, last) = (doc.motion.frame_at(self.playhead), doc.motion.frame_at(doc.motion.duration));
+        let frame = (frame + dir.signum() as i64).clamp(0, last);
+        let t = (frame as f32 / doc.motion.fps.max(1) as f32).min(doc.motion.duration);
+        self.playing = false;
+        self.playhead = t;
     }
 
     /// Save the current pose at the playhead: keys for the parts that differ
@@ -391,12 +419,13 @@ impl AppState {
     /// no motion yet). Bound to K and the "Key pose" button.
     pub fn key_pose(&mut self) {
         let before = self.snapshot();
+        let t = self.key_time();
         let Some(doc) = &mut self.doc else { return };
-        let current = doc.motion.sample(self.playhead, &doc.skeleton);
-        doc.motion.set_keys(self.playhead, &doc.skeleton, &doc.pose, Some(&current));
+        let current = doc.motion.sample(t, &doc.skeleton);
+        doc.motion.set_keys(t, &doc.skeleton, &doc.pose, Some(&current));
         let changed = before.as_ref().is_none_or(|b| b.motion != doc.motion);
         self.status = if changed {
-            format!("Keyed pose at {:.2} s", self.playhead)
+            format!("Keyed pose at frame {} ({t:.2} s)", doc.motion.frame_at(t))
         } else {
             "Nothing to key: the pose already matches the motion here".into()
         };
@@ -405,26 +434,33 @@ impl AppState {
     }
 
     pub fn toggle_play(&mut self) {
+        if self.playing {
+            self.pause();
+            return;
+        }
         let Some(doc) = &self.doc else { return };
-        if !self.playing && !self.looping && self.playhead >= doc.motion.duration {
+        if !self.looping && self.playhead >= doc.motion.duration {
             self.playhead = 0.0;
         }
-        self.playing = !self.playing;
+        self.playing = true;
     }
 
     /// Key every part at the playhead, as currently posed.
     pub fn key_all(&mut self) {
         let before = self.snapshot();
+        let t = self.key_time();
         let Some(doc) = &mut self.doc else { return };
-        doc.motion.set_keys(self.playhead, &doc.skeleton, &doc.pose, None);
+        doc.motion.set_keys(t, &doc.skeleton, &doc.pose, None);
         self.commit(before);
     }
 
-    pub fn delete_keys_here(&mut self) {
-        let before = self.snapshot();
-        let Some(doc) = &mut self.doc else { return };
-        doc.motion.remove_keys_at(self.playhead);
-        self.commit(before);
+    /// Select every key on the timeline (Ctrl+A in Pose mode).
+    pub fn select_all_keys(&mut self) {
+        let Some(doc) = &self.doc else { return };
+        self.key_sel = doc.motion.key_times().into_iter().flat_map(|t| doc.motion.keys_at(t)).collect();
+        if !self.key_sel.is_empty() {
+            self.status = format!("Selected all {} keys", self.key_sel.len());
+        }
     }
 
     /// Copy the selected keys, to the app and to the system clipboard (as
@@ -449,9 +485,10 @@ impl AppState {
             return;
         }
         let before = self.snapshot();
+        let t = self.key_time();
         let Some(doc) = &mut self.doc else { return };
-        self.key_sel = doc.motion.paste(&clip, self.playhead);
-        self.status = format!("Pasted {} keys at {:.2} s", clip.keys.len(), self.playhead);
+        self.key_sel = doc.motion.paste(&clip, t);
+        self.status = format!("Pasted {} keys at frame {}", clip.keys.len(), doc.motion.frame_at(t));
         self.commit(before);
     }
 
@@ -871,6 +908,7 @@ impl AppState {
              Drag any other bone end: rotate that part (children follow)\n\
              Drag the root's start dot: move the whole figure\n\
              B: show/hide bones   Space: play/pause   K: key pose\n\
+             , and .: previous / next frame   Ctrl+A: select all keys\n\
              Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
              Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
         );
@@ -1279,6 +1317,43 @@ mod tests {
     }
 
     #[test]
+    fn frames_step_snap_and_key_on_the_grid() {
+        let mut state = open_sample();
+        let ctx = egui::Context::default();
+        state.mode = Mode::Pose;
+        state.doc.as_mut().unwrap().motion.fps = 10;
+
+        // Stepping moves one frame and stops at both ends.
+        state.step_frame(1);
+        state.step_frame(1);
+        assert!((state.playhead - 0.2).abs() < 1e-6);
+        state.step_frame(-1);
+        state.step_frame(-1);
+        state.step_frame(-1);
+        assert_eq!(state.playhead, 0.0);
+
+        // Pausing mid-frame lands on the nearest frame; keys go there too.
+        state.playing = true;
+        state.playhead = 0.73;
+        state.toggle_play();
+        assert!(!state.playing && (state.playhead - 0.7).abs() < 1e-6);
+        state.playhead = 1.26;
+        state.key_all();
+        assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![1.3]);
+
+        // Playback holds each frame: 1.29 s still shows frame 12 (1.2 s).
+        state.key_sel.clear();
+        state.playhead = 0.0;
+        state.key_all();
+        state.playing = true;
+        state.playhead = 1.29 - ctx.input(|i| i.stable_dt).min(0.1);
+        state.tick(&ctx);
+        let m = &state.doc.as_ref().unwrap().motion;
+        let expected = m.sample(1.2, &state.doc.as_ref().unwrap().skeleton);
+        assert_eq!(state.doc.as_ref().unwrap().pose, expected);
+    }
+
+    #[test]
     fn copy_paste_delete_selected_keys() {
         let mut state = open_sample();
         let ctx = egui::Context::default();
@@ -1300,6 +1375,11 @@ mod tests {
         state.playhead = 2.5;
         state.paste_keys(Some("not keys"));
         assert_eq!(state.doc.as_ref().unwrap().motion.key_times(), vec![0.5, 2.0, 2.5]);
+
+        // Ctrl+A selects every key across all three times.
+        state.select_all_keys();
+        assert_eq!(state.key_sel.len(), 3 * n);
+        state.key_sel = state.doc.as_ref().unwrap().motion.keys_at(2.5);
 
         // Delete the selection (the 2.5 keys), then undo it.
         state.delete_selected_keys();

@@ -14,6 +14,12 @@ use std::collections::BTreeMap;
 /// Keys closer together than this (seconds) count as the same moment.
 pub const KEY_EPSILON: f32 = 1.0 / 120.0;
 
+/// Frame rate of a new motion, and of projects saved before it was stored.
+pub const DEFAULT_FPS: u32 = 24;
+
+/// Highest frame rate allowed: frames stay further apart than `KEY_EPSILON`.
+pub const MAX_FPS: u32 = 60;
+
 /// How a value travels from one key to the next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Ease {
@@ -52,6 +58,9 @@ pub struct Key {
 pub struct Motion {
     /// Length in seconds (what playback loops over).
     pub duration: f32,
+    /// Frames per second: the grid the timeline snaps to, and the export's
+    /// default. Keys are still stored in seconds, so changing it moves nothing.
+    pub fps: u32,
     /// Part name → angle keys (radians, as in `Pose`), sorted by time.
     pub tracks: BTreeMap<String, Vec<Key>>,
     /// Whole-figure movement keys (pixels).
@@ -61,11 +70,26 @@ pub struct Motion {
 
 impl Default for Motion {
     fn default() -> Self {
-        Motion { duration: 3.0, tracks: BTreeMap::new(), offset_x: Vec::new(), offset_y: Vec::new() }
+        Motion { duration: 3.0, fps: DEFAULT_FPS, tracks: BTreeMap::new(), offset_x: Vec::new(), offset_y: Vec::new() }
     }
 }
 
 impl Motion {
+    /// Length of one frame in seconds.
+    pub fn frame_len(&self) -> f32 {
+        1.0 / self.fps.max(1) as f32
+    }
+
+    /// Number of the frame nearest to time `t` (frame 0 starts at 0 s).
+    pub fn frame_at(&self, t: f32) -> i64 {
+        (t * self.fps.max(1) as f32).round() as i64
+    }
+
+    /// `t` moved to the nearest whole frame.
+    pub fn snap(&self, t: f32) -> f32 {
+        self.frame_at(t) as f32 / self.fps.max(1) as f32
+    }
+
     pub fn is_empty(&self) -> bool {
         self.tracks.values().all(Vec::is_empty) && self.offset_x.is_empty() && self.offset_y.is_empty()
     }
@@ -301,6 +325,18 @@ mod tests {
 
     fn key(t: f32, value: f32, ease: Ease) -> Key {
         Key { t, value, ease }
+    }
+
+    #[test]
+    fn frames_snap_and_count() {
+        let m = Motion { fps: 24, ..Motion::default() };
+        assert_eq!(m.frame_at(0.5), 12);
+        assert_eq!(m.snap(0.51), 0.5);
+        assert_eq!(m.snap(0.49), 0.5);
+        assert!((m.frame_len() - 1.0 / 24.0).abs() < 1e-7);
+        // Projects saved before fps existed open at the default.
+        let old: Motion = serde_json::from_str(r#"{"duration": 2.0, "tracks": {}}"#).unwrap();
+        assert_eq!(old.fps, DEFAULT_FPS);
     }
 
     #[test]

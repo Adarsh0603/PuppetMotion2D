@@ -84,6 +84,15 @@ impl App {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::K)) {
                 self.state.key_pose();
             }
+            if pressed(ctx, Modifiers::COMMAND, Key::A) {
+                self.state.select_all_keys();
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Comma)) {
+                self.state.step_frame(-1);
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Period)) {
+                self.state.step_frame(1);
+            }
         }
         // Space plays/pauses in Pose mode, unless it was held to pan (Space+drag).
         if ctx.input(|i| i.key_released(Key::Space)) {
