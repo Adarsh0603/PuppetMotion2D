@@ -16,7 +16,7 @@ use crate::rig::Affine2;
 use crate::sprites::Sprite;
 
 /// Grid cells are about this fraction of the character's longer side…
-const CELLS_PER_FIGURE: f32 = 48.0;
+const CELLS_PER_FIGURE: f32 = 160.0;
 /// …but never smaller than this (px), so huge drawings don't get huge meshes.
 const MIN_CELL: f32 = 4.0;
 
@@ -91,8 +91,17 @@ fn part_mesh(s: &Sprite, cell: f32) -> PartMesh {
             }
             let (a, b) = (point(i, j, &mut mesh), point(i + 1, j, &mut mesh));
             let (c, d) = (point(i + 1, j + 1, &mut mesh), point(i, j + 1, &mut mesh));
-            mesh.triangles.push([a, b, c]);
-            mesh.triangles.push([a, c, d]);
+            // Split cells along alternating diagonals (by their place on the
+            // shared lattice), so blends don't line up into one long zigzag.
+            let gx = ((s.origin[0] as f32 + xs[i] + 0.5) / cell).floor() as i64;
+            let gy = ((s.origin[1] as f32 + ys[j] + 0.5) / cell).floor() as i64;
+            if (gx + gy).rem_euclid(2) == 0 {
+                mesh.triangles.push([a, b, c]);
+                mesh.triangles.push([a, c, d]);
+            } else {
+                mesh.triangles.push([a, b, d]);
+                mesh.triangles.push([b, c, d]);
+            }
         }
     }
     mesh
@@ -347,7 +356,7 @@ mod tests {
 
     #[test]
     fn cell_size_follows_the_figure_with_a_floor() {
-        assert_eq!(cell_size(RectI::new(0, 0, 96, 480)), 10.0);
+        assert_eq!(cell_size(RectI::new(0, 0, 96, 1600)), 10.0);
         assert_eq!(cell_size(RectI::new(0, 0, 20, 20)), MIN_CELL);
     }
 }

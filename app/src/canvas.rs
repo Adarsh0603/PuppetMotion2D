@@ -2,7 +2,7 @@
 //! drawing: the found character (Import), draggable joints (Rig), the posed
 //! character (Animate), and the exported area (Export).
 
-use crate::state::{AppState, SkelSel, Step, part_color};
+use crate::state::{AppState, Brush, SkelSel, Step, part_color};
 use anim_core::skeleton::dist_to_segment;
 use anim_core::{Affine2, RectI, Toward, aim_part, ik_parent, posed_joint, solve_two_bone, world_transforms};
 use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2};
@@ -67,6 +67,8 @@ pub enum Drag {
     PoseRotate { part: usize },
     /// Animate step: moving the whole figure by a root's pivot.
     PoseMove,
+    /// Rig step: painting the selected bone's weights with the brush.
+    Paint,
 }
 
 /// A bone shorter than this (image px) after Shift+drag is discarded.
@@ -122,7 +124,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     state.refresh_overlay(ui.ctx());
     // Rig only needs the meshes for "Show mesh", and rebuilding them is too
     // slow to do on every frame of a joint drag, so they catch up on release.
-    let rig_mesh = state.step == Step::Rig && state.show_mesh && matches!(state.drag, Drag::None);
+    let rig_mesh = state.step == Step::Rig
+        && (state.show_mesh || state.paint_mode)
+        && matches!(state.drag, Drag::None | Drag::Paint);
     if state.step.shows_pose() || rig_mesh {
         state.refresh_sprites(ui.ctx());
     }
@@ -135,8 +139,23 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     match state.step {
         Step::Review | Step::Rig => {
             painter.image(doc.texture.id(), image_rect, uv, Color32::WHITE);
-            if let Some(overlay) = &doc.overlay {
+            let painting = state.step == Step::Rig && state.paint_mode;
+            if let Some(overlay) = &doc.overlay
+                && !painting
+            {
                 painter.image(overlay.id(), image_rect, uv, Color32::WHITE);
+            }
+            if let (true, SkelSel::Part(bone)) = (painting, state.skel_sel) {
+                draw_weight_heat(&painter, canvas, state, bone);
+                if let Some(h) = response.hover_pos() {
+                    let color = match state.brush {
+                        Brush::Add => Color32::WHITE,
+                        Brush::Remove => Color32::from_rgb(120, 190, 255),
+                        Brush::Smooth => Color32::from_rgb(255, 220, 120),
+                    };
+                    let stroke = Stroke::new(1.5, color);
+                    painter.circle_stroke(h, state.brush_size, stroke);
+                }
             }
             if state.step == Step::Rig {
                 if state.show_mesh {
@@ -264,6 +283,31 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
     }
     if let Some(j) = active {
         label(painter, to_screen(joints[j]) + vec2(10.0, -10.0), &skel.joints[j].name);
+    }
+}
+
+/// The weight brush's view: every part, as drawn, coloured by how much `bone`
+/// pulls it, from blue (not at all) to red (fully). The colour is drawn
+/// through each part's silhouette, so it follows the drawing's outline.
+fn draw_weight_heat(painter: &egui::Painter, canvas: Rect, state: &AppState, bone: usize) {
+    let doc = state.doc.as_ref().unwrap();
+    let heat = |w: f32| {
+        let (cold, hot) = ([40.0, 90.0, 255.0], [255.0, 50.0, 40.0]);
+        let mix = |k: usize| (cold[k] + (hot[k] - cold[k]) * w) as u8;
+        Color32::from_rgba_unmultiplied(mix(0), mix(1), mix(2), (120.0 + 70.0 * w) as u8)
+    };
+    for m in &doc.meshes {
+        let Some(Some(shape)) = doc.silhouette_tex.get(m.part) else { continue };
+        let mut mesh = egui::Mesh::with_texture(shape.id());
+        for ((p, ws), uv) in m.points.iter().zip(&m.weights).zip(&m.uvs) {
+            let w = ws.iter().find(|&&(b, _)| b == bone).map_or(0.0, |&(_, w)| w);
+            let pos = state.view.image_to_screen(canvas, pos2(p[0], p[1]));
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv: pos2(uv[0], uv[1]), color: heat(w) });
+        }
+        for t in &m.triangles {
+            mesh.add_triangle(t[0], t[1], t[2]);
+        }
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 
@@ -474,6 +518,12 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
             Drag::Pan
         } else if let (true, Some(o)) = (response.dragged_by(PointerButton::Primary), origin) {
             match state.step {
+                // With the weight brush on, dragging paints instead of moving joints.
+                Step::Rig if state.paint_mode && matches!(state.skel_sel, SkelSel::Part(_)) => {
+                    let p = view.screen_to_image(canvas, o);
+                    state.paint_dab([p.x, p.y]);
+                    Drag::Paint
+                }
                 Step::Rig => begin_joint_drag(state, canvas, o, shift),
                 Step::Animate => {
                     let joints = posed_joints(state);
@@ -519,6 +569,11 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
                     doc.pose.offset[1] += d.y;
                 }
             }
+            Drag::Paint => {
+                if let Some(p) = pointer_img {
+                    state.paint_dab([p.x, p.y]);
+                }
+            }
             Drag::None => {}
         }
     }
@@ -538,6 +593,17 @@ fn handle_pointer(ui: &egui::Ui, response: &egui::Response, canvas: Rect, state:
     }
 
     if state.step == Step::Rig
+        && state.paint_mode
+        && matches!(state.skel_sel, SkelSel::Part(_))
+        && response.clicked_by(PointerButton::Primary)
+        && let Some(screen) = response.interact_pointer_pos()
+    {
+        // A click with the brush is one dab (and one undo step).
+        let before = state.snapshot();
+        let p = view.screen_to_image(canvas, screen);
+        state.paint_dab([p.x, p.y]);
+        state.commit(before);
+    } else if state.step == Step::Rig
         && response.clicked()
         && let Some(screen) = response.interact_pointer_pos()
     {

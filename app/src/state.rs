@@ -3,7 +3,7 @@ use crate::export::ExportUi;
 use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Ease, History, KeyRef, PartMesh, Template, Toward, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    Clip, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
     NO_PART, distance_transform, foreground_mask, load_project, project, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -83,6 +83,14 @@ impl Step {
     }
 }
 
+/// What the weight brush does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Brush {
+    Add,
+    Remove,
+    Smooth,
+}
+
 /// What is selected in the Rig step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkelSel {
@@ -98,6 +106,7 @@ pub struct Snapshot {
     pub skeleton: Skeleton,
     pub pose: Pose,
     pub motion: Motion,
+    pub paint: WeightPaint,
 }
 
 /// Keys being dragged along the timeline.
@@ -141,9 +150,13 @@ pub struct Doc {
     /// `sprites_dirty` is set.
     pub sprites: Vec<Sprite>,
     pub sprite_tex: Vec<Option<TextureHandle>>,
+    /// Each part's shape as a white texture (for tinting, e.g. the weight heat map).
+    pub silhouette_tex: Vec<Option<TextureHandle>>,
     /// One triangle mesh per part over its sprite, rebuilt with the sprites.
     /// The canvas draws the character as these, bent by the bones.
     pub meshes: Vec<PartMesh>,
+    /// Bone weights painted with the weight brush, on top of the automatic ones.
+    pub paint: WeightPaint,
     pub sprites_dirty: bool,
     /// The original image file, kept byte for byte so projects store it unchanged.
     pub image_bytes: Vec<u8>,
@@ -160,14 +173,25 @@ impl Doc {
             skeleton: self.skeleton.clone(),
             pose: self.pose.clone(),
             motion: self.motion.clone(),
+            paint: self.paint.clone(),
         }
     }
 
-    /// Put back a snapshot's skeleton, pose and motion (masks are recomputed by the caller).
+    /// Put back a snapshot's skeleton, pose, motion and painted weights (masks
+    /// are recomputed by the caller).
     fn restore(&mut self, s: Snapshot) {
         self.skeleton = s.skeleton;
         self.pose = s.pose;
         self.motion = s.motion;
+        self.paint = s.paint;
+    }
+
+    /// Work out every mesh point's bone weights: the automatic blend at the
+    /// joints (`softness`), then the painted changes. Quick, so a brush
+    /// stroke can redo it every frame.
+    pub fn update_weights(&mut self, softness: f32) {
+        smooth_weights(&mut self.meshes, &self.skeleton, &self.dt, self.fg.w as usize, softness);
+        apply_paint(&mut self.meshes, &self.skeleton, &self.paint);
     }
 
     /// Back to the pose as drawn. Needed whenever bones are added or removed,
@@ -253,12 +277,22 @@ pub struct AppState {
     /// How smoothly the drawing bends at the joints: the blend band's half-width
     /// as a multiple of the drawing's thickness there (0 = rigid pieces). Saved.
     pub softness: f32,
+    /// Guess what's hidden behind parts (shown when they move away). Saved.
+    pub fill_behind: bool,
     /// Animate step: show the original drawing faintly behind the posed parts.
     pub show_ghost: bool,
     /// Animate step: draw bones and joint dots over the parts (B toggles).
     pub show_bones: bool,
     /// Rig and Animate: draw the triangle mesh over the character.
     pub show_mesh: bool,
+    /// Rig: dragging on the drawing paints the selected bone's weights.
+    pub paint_mode: bool,
+    /// What the weight brush does: add, remove or smooth the selected bone's pull.
+    pub brush: Brush,
+    /// Brush radius, in screen points (so it feels the same at any zoom).
+    pub brush_size: f32,
+    /// How much one dab changes a weight (0..1).
+    pub brush_strength: f32,
     /// Part whose row the pointer is on in the Layers list; the canvas lights it up.
     pub highlight_part: Option<usize>,
     /// Skeleton templates: built-in ones, then the user's own.
@@ -306,9 +340,14 @@ impl Default for AppState {
             show_parts: true,
             overlap: 1.0,
             softness: DEFAULT_SOFTNESS,
+            fill_behind: true,
             show_ghost: false,
             show_bones: true,
             show_mesh: false,
+            paint_mode: false,
+            brush: Brush::Add,
+            brush_size: 30.0,
+            brush_strength: 0.1,
             highlight_part: None,
             templates: crate::templates::all(),
             template_choice: 0,
@@ -369,8 +408,9 @@ impl AppState {
         self.params = data.params;
         self.overlap = data.overlap;
         self.softness = data.softness;
+        self.fill_behind = data.fill_behind;
         let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext) else { return };
-        doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion });
+        doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion, paint: data.weight_paint });
         doc.recompute_skeleton();
         doc.project_path = Some(path.to_path_buf());
         self.status = format!("Opened project {}", path.file_name().unwrap_or_default().to_string_lossy());
@@ -444,7 +484,9 @@ impl AppState {
             motion: Motion::default(),
             sprites: Vec::new(),
             sprite_tex: Vec::new(),
+            silhouette_tex: Vec::new(),
             meshes: Vec::new(),
+            paint: WeightPaint::default(),
             sprites_dirty: true,
             image_bytes: bytes,
             image_ext: ext,
@@ -730,6 +772,8 @@ impl AppState {
             pose: doc.pose.clone(),
             overlap: self.overlap,
             softness: self.softness,
+            fill_behind: self.fill_behind,
+            weight_paint: doc.paint.clone(),
             motion: doc.motion.clone(),
         })
     }
@@ -801,6 +845,7 @@ impl AppState {
                 for (o, n) in old.iter().zip(new) {
                     if o.name != n.name && !doc.motion.tracks.contains_key(&n.name) {
                         doc.motion.rename_track(&o.name, &n.name);
+                        doc.paint.rename(&o.name, &n.name);
                     }
                 }
             }
@@ -872,15 +917,29 @@ impl AppState {
         }
         doc.sprites_dirty = false;
         doc.skel_masks = masks_from_labels(&doc.skel_labels, doc.fg.w, doc.fg.h, doc.skeleton.parts.len());
-        doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap);
+        doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap, self.fill_behind);
         doc.meshes = build_meshes(&doc.sprites, cell_size(doc.figure_box()));
-        smooth_weights(&mut doc.meshes, &doc.skeleton, &doc.dt, doc.fg.w as usize, self.softness);
+        doc.update_weights(self.softness);
         doc.sprite_tex = doc
             .sprites
             .iter()
             .map(|s| {
                 (s.image.width() > 0)
                     .then(|| ctx.load_texture(format!("part {}", s.part), to_color_image(&s.image), SMOOTH))
+            })
+            .collect();
+        // Each part's shape in white, which the weight heat map is tinted
+        // through so it follows the drawing's outline instead of mesh cells.
+        doc.silhouette_tex = doc
+            .sprites
+            .iter()
+            .map(|s| {
+                (s.image.width() > 0).then(|| {
+                    let white: Vec<Color32> =
+                        s.image.pixels().map(|p| Color32::from_rgba_unmultiplied(255, 255, 255, p.0[3])).collect();
+                    let image = ColorImage::new([s.image.width() as usize, s.image.height() as usize], white);
+                    ctx.load_texture(format!("part {} shape", s.part), image, SMOOTH)
+                })
             })
             .collect();
     }
@@ -1123,7 +1182,17 @@ impl AppState {
                 && let Some(doc) = &mut self.doc
             {
                 // Only the weights change, which is quick enough to redo while dragging.
-                smooth_weights(&mut doc.meshes, &doc.skeleton, &doc.dt, doc.fg.w as usize, self.softness);
+                doc.update_weights(self.softness);
+                doc.dirty = true;
+            }
+            let fill = self.fill_behind;
+            ui.checkbox(&mut self.fill_behind, "Fill behind parts").on_hover_text(
+                "Guess what's hidden behind an arm or the head, so moving them shows more body instead of a hole",
+            );
+            if fill != self.fill_behind
+                && let Some(doc) = &mut self.doc
+            {
+                doc.sprites_dirty = true;
                 doc.dirty = true;
             }
         });
@@ -1290,6 +1359,56 @@ impl AppState {
             };
             card(ui, &title, |ui| self.selection_editor(ui, sel));
         }
+        match self.skel_sel {
+            SkelSel::Part(p) => card(ui, "Weight brush", |ui| self.weight_brush(ui, p)),
+            // The brush paints one bone, so it needs one selected.
+            _ => self.paint_mode = false,
+        }
+    }
+
+    /// The weight brush for bone `p`: paint where it pulls the drawing.
+    fn weight_brush(&mut self, ui: &mut egui::Ui, p: usize) {
+        let name = self.doc.as_ref().map_or(String::new(), |d| d.skeleton.parts[p].name.clone());
+        ui.toggle_value(&mut self.paint_mode, "Paint weights")
+            .on_hover_text("Drag on the drawing to change where this bone pulls it");
+        if !self.paint_mode {
+            ui.label(egui::RichText::new("Fix spots that follow the wrong bone, like hair that should move with the head.").weak());
+            return;
+        }
+        ui.label(egui::RichText::new(format!("Red follows {name} fully, blue not at all.")).weak());
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.brush, Brush::Add, "Add").on_hover_text("Make it follow this bone more");
+            ui.selectable_value(&mut self.brush, Brush::Remove, "Remove").on_hover_text("Make it follow this bone less");
+            ui.selectable_value(&mut self.brush, Brush::Smooth, "Smooth")
+                .on_hover_text("Soften hard edges in what you painted, for a smoother bend");
+        });
+        ui.add(egui::Slider::new(&mut self.brush_size, 5.0..=150.0).text("size"));
+        ui.add(egui::Slider::new(&mut self.brush_strength, 0.02..=0.5).text("strength"));
+        let painted = self.doc.as_ref().is_some_and(|d| d.paint.bones.get(&name).is_some_and(|v| !v.is_empty()));
+        if ui.add_enabled(painted, egui::Button::new(format!("Clear painting for {name}"))).clicked() {
+            let before = self.snapshot();
+            if let Some(doc) = &mut self.doc {
+                doc.paint.clear(&name);
+                doc.update_weights(self.softness);
+            }
+            self.commit(before);
+        }
+    }
+
+    /// One dab of the weight brush at `at` (drawing px) for the selected bone.
+    pub fn paint_dab(&mut self, at: [f32; 2]) {
+        let SkelSel::Part(p) = self.skel_sel else { return };
+        let (zoom, brush, size, strength, softness) =
+            (self.view.zoom, self.brush, self.brush_size, self.brush_strength, self.softness);
+        let Some(doc) = &mut self.doc else { return };
+        let Some(name) = doc.skeleton.parts.get(p).map(|b| b.name.clone()) else { return };
+        let (cell, radius) = (cell_size(doc.figure_box()), size / zoom.max(1e-3));
+        match brush {
+            Brush::Add => doc.paint.dab(&name, at, radius, strength, cell),
+            Brush::Remove => doc.paint.dab(&name, at, radius, -strength, cell),
+            Brush::Smooth => doc.paint.smooth(&name, at, radius, (strength * 4.0).min(1.0)),
+        }
+        doc.update_weights(softness);
     }
 
     /// The bones as a tree, children under their parent. Click one to select it.
@@ -1457,6 +1576,7 @@ fn step_shortcuts(step: Step) -> &'static [(&'static str, &'static str)] {
             ("Click", "Select a joint or bone"),
             ("Delete", "Remove the selection"),
             ("[  ]", "Send bone back / forward"),
+            ("Drag (brush on)", "Paint the selected bone's weights"),
             ("Ctrl+Z", "Undo"),
             ("Ctrl+Shift+Z", "Redo"),
             ("Middle-drag", "Pan the view"),
@@ -1919,6 +2039,54 @@ mod tests {
             let want = t[arm].apply(*p);
             assert!((moved[0] - want[0]).abs() < 1e-3 && (moved[1] - want[1]).abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn weight_brush_paints_undoes_saves_and_follows_renames() {
+        let mut state = open_sample();
+        let ctx = egui::Context::default();
+        state.set_step(Step::Rig);
+        state.refresh_sprites(&ctx);
+        let head = state.doc.as_ref().unwrap().skeleton.parts.iter().position(|p| p.name == "head").unwrap();
+        let torso_mesh = 1;
+        let pull = |state: &AppState| -> f32 {
+            let m = &state.doc.as_ref().unwrap().meshes[torso_mesh];
+            m.weights.iter().map(|w| w.iter().find(|x| x.0 == head).map_or(0.0, |x| x.1)).sum()
+        };
+        let before_paint = pull(&state);
+
+        // Paint the head onto the middle of the torso: one stroke, one undo step.
+        state.skel_sel = SkelSel::Part(head);
+        state.paint_mode = true;
+        let mid = {
+            let m = &state.doc.as_ref().unwrap().meshes[torso_mesh];
+            m.points[m.points.len() / 2]
+        };
+        let before = state.snapshot();
+        for _ in 0..5 {
+            state.paint_dab(mid);
+        }
+        state.commit(before);
+        assert!(pull(&state) > before_paint + 0.5, "the torso now follows the head there");
+
+        // Saved with the project, under the bone's name; renaming keeps it.
+        let path = std::env::temp_dir().join(format!("pm2d_paint_test_{}.pm2d", std::process::id()));
+        state.save_to(&path);
+        let mut fresh = AppState::default();
+        fresh.open(&ctx, &path);
+        assert_eq!(fresh.doc.as_ref().unwrap().paint, state.doc.as_ref().unwrap().paint);
+        std::fs::remove_file(&path).unwrap();
+        let before = state.snapshot();
+        state.doc.as_mut().unwrap().skeleton.parts[head].name = "big head".into();
+        state.commit(before);
+        assert!(state.doc.as_ref().unwrap().paint.bones.contains_key("big head"));
+
+        // Undo takes the rename and then the stroke away.
+        state.undo();
+        state.undo();
+        assert!(state.doc.as_ref().unwrap().paint.is_empty());
+        state.refresh_sprites(&ctx);
+        assert!((pull(&state) - before_paint).abs() < 1e-4);
     }
 
     #[test]

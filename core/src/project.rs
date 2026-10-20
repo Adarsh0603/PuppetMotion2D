@@ -41,6 +41,17 @@ pub struct ProjectData {
     /// Projects saved before bending existed open rigid, so they look the same.
     #[serde(default)]
     pub softness: f32,
+    /// Hand-painted bone weights (none in older projects).
+    #[serde(default)]
+    pub weight_paint: crate::weight_paint::WeightPaint,
+    /// Guess what's hidden behind parts, shown when they move away. On for
+    /// older projects too: it changes nothing at rest, only fills holes.
+    #[serde(default = "yes")]
+    pub fill_behind: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_overlap() -> f32 {
@@ -124,6 +135,12 @@ mod tests {
             pose,
             overlap: 0.5,
             softness: 0.8,
+            fill_behind: false,
+            weight_paint: {
+                let mut p = crate::weight_paint::WeightPaint::default();
+                p.dab("head", [10.0, 12.0], 6.0, 0.4, 3.0);
+                p
+            },
             motion: {
                 let mut m = Motion::default();
                 m.offset_x.push(crate::motion::Key { t: 0.5, value: 2.0, ease: crate::motion::Ease::Hold });

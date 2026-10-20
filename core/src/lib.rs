@@ -3,6 +3,7 @@
 pub mod background;
 pub mod components;
 pub mod cutout;
+pub mod fill;
 pub mod geom;
 pub mod history;
 pub mod mask;
@@ -14,6 +15,7 @@ pub mod rig;
 pub mod skeleton;
 pub mod sprites;
 pub mod template;
+pub mod weight_paint;
 
 pub use cutout::{Params, foreground_mask};
 pub use geom::RectI;
@@ -28,3 +30,4 @@ pub use rig::{
 pub use sprites::{Sprite, build_sprites};
 pub use skeleton::{Joint, NO_PART, SkelPart, Skeleton, SkeletonMasks, Toward, distance_transform, masks_from_labels, part_labels, skeleton_masks, skeleton_masks_with_dt};
 pub use template::Template;
+pub use weight_paint::{WeightPaint, apply_paint};

@@ -5,6 +5,7 @@
 //! changes; when the child rotates, the disc fills the gap it would leave,
 //! like the round joints of a paper cut-out puppet.
 
+use crate::geom::RectI;
 use crate::mask::Mask;
 use crate::skeleton::Skeleton;
 use image::RgbaImage;
@@ -55,7 +56,9 @@ pub fn sprite_masks(fg: &Mask, dt: &[f32], skel: &Skeleton, masks: &[Mask], over
 }
 
 /// Cut `img` into one sprite per part. `masks` come from `skeleton_masks`;
-/// `fg` is the whole-figure mask and `dt` its `distance_transform`.
+/// `fg` is the whole-figure mask and `dt` its `distance_transform`. With
+/// `fill`, each part also gets a guess at what's hidden behind the parts in
+/// front of it (see `fill::fill_behind`), shown when they move away.
 pub fn build_sprites(
     img: &RgbaImage,
     fg: &Mask,
@@ -63,20 +66,31 @@ pub fn build_sprites(
     skel: &Skeleton,
     masks: &[Mask],
     overlap: f32,
+    fill: bool,
 ) -> Vec<Sprite> {
+    let fills = if fill { crate::fill::fill_behind(img, masks, &skel.paint_order()) } else { vec![None; masks.len()] };
     sprite_masks(fg, dt, skel, masks, overlap)
         .iter()
         .enumerate()
         .map(|(part, m)| {
             let pivot = skel.joints[skel.parts[part].pivot].pos;
-            let Some(bb) = m.bbox() else {
-                return Sprite { part, image: RgbaImage::new(0, 0), origin: [pivot[0] as i32, pivot[1] as i32], pivot };
+            let patch = fills.get(part).and_then(Option::as_ref);
+            let bb = match (m.bbox(), patch.and_then(|f| f.bbox())) {
+                (Some(a), Some(b)) => RectI::from_corners(a.x.min(b.x), a.y.min(b.y), a.right().max(b.right()), a.bottom().max(b.bottom())),
+                (a, b) => match a.or(b) {
+                    Some(r) => r,
+                    None => {
+                        return Sprite { part, image: RgbaImage::new(0, 0), origin: [pivot[0] as i32, pivot[1] as i32], pivot };
+                    }
+                },
             };
             let mut image = RgbaImage::new(bb.w as u32, bb.h as u32);
             for (x, y, px) in image.enumerate_pixels_mut() {
                 let (sx, sy) = (x + bb.x as u32, y + bb.y as u32);
                 if m.get(sx, sy) {
                     *px = *img.get_pixel(sx, sy);
+                } else if let Some(c) = patch.and_then(|f| f.get(sx as i32, sy as i32)) {
+                    *px = image::Rgba(c);
                 }
             }
             Sprite { part, image, origin: [bb.x, bb.y], pivot }
@@ -119,24 +133,27 @@ mod tests {
     fn rest_pose_reassembles_the_drawing() {
         let (img, fg, skel) = figure();
         let sm = skeleton_masks(&fg, &skel);
-        let sprites = build_sprites(&img, &fg, &distance_transform(&fg), &skel, &sm.masks, 1.0);
-        let mut out = RgbaImage::new(120, 120);
-        for p in skel.draw_order() {
-            let s = &sprites[p];
-            for (x, y, px) in s.image.enumerate_pixels() {
-                if px.0[3] > 0 {
-                    out.put_pixel(x + s.origin[0] as u32, y + s.origin[1] as u32, *px);
+        // With or without the fill behind parts: at rest, the drawing is unchanged.
+        for fill in [false, true] {
+            let sprites = build_sprites(&img, &fg, &distance_transform(&fg), &skel, &sm.masks, 1.0, fill);
+            let mut out = RgbaImage::new(120, 120);
+            for p in skel.paint_order() {
+                let s = &sprites[p];
+                for (x, y, px) in s.image.enumerate_pixels() {
+                    if px.0[3] > 0 {
+                        out.put_pixel(x + s.origin[0] as u32, y + s.origin[1] as u32, *px);
+                    }
                 }
             }
-        }
-        for (x, y, px) in out.enumerate_pixels() {
-            if fg.get(x, y) {
-                assert_eq!(px, img.get_pixel(x, y), "figure pixel ({x},{y}) reproduced");
-            } else {
-                assert_eq!(px.0[3], 0, "background stays empty");
+            for (x, y, px) in out.enumerate_pixels() {
+                if fg.get(x, y) {
+                    assert_eq!(px, img.get_pixel(x, y), "figure pixel ({x},{y}) reproduced (fill {fill})");
+                } else {
+                    assert_eq!(px.0[3], 0, "background stays empty (fill {fill})");
+                }
             }
+            assert_eq!(sprites[0].pivot, [60.0, 95.0]);
         }
-        assert_eq!(sprites[0].pivot, [60.0, 95.0]);
     }
 
     #[test]
