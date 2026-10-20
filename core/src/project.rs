@@ -6,7 +6,6 @@
 //! get defaults); an older app refuses files newer than it understands.
 
 use crate::cutout::Params;
-use crate::parts::PartBox;
 use crate::motion::Motion;
 use crate::rig::Pose;
 use crate::skeleton::Skeleton;
@@ -32,8 +31,6 @@ pub struct ProjectData {
     pub skeleton: Skeleton,
     #[serde(default)]
     pub pose: Pose,
-    #[serde(default)]
-    pub boxes: Vec<PartBox>,
     /// Joint overlap (disc size) used for the cut-out parts.
     #[serde(default = "default_overlap")]
     pub overlap: f32,
@@ -121,7 +118,6 @@ mod tests {
             params: Params { gap_close: 6, ..Params::default() },
             skeleton: Skeleton::person_front(RectI::new(0, 0, 100, 200)),
             pose,
-            boxes: vec![PartBox { rect: RectI::new(1, 2, 3, 4), axis: crate::parts::Axis::DiagUp }],
             overlap: 0.5,
             motion: {
                 let mut m = Motion::default();
@@ -156,10 +152,13 @@ mod tests {
 
     #[test]
     fn older_data_without_new_fields_loads() {
-        // A part saved before rotation limits existed, and a project without pose/boxes/overlap.
+        // A part saved before rotation limits existed, a project without
+        // pose/overlap, and fields from removed features (boxes, keep_ratio).
         let json = r#"{
             "format_version": 1,
             "image_name": "a.png",
+            "params": {"threshold": 30.0, "keep_ratio": 0.2},
+            "boxes": [{"rect": {"x": 1, "y": 2, "w": 3, "h": 4}, "axis": "DiagUp"}],
             "skeleton": {
                 "joints": [{"name": "a", "pos": [0, 0]}, {"name": "b", "pos": [10, 0]}],
                 "parts": [{"name": "bone 1", "pivot": 0, "tip": 1, "parent": null}]
@@ -167,7 +166,7 @@ mod tests {
         }"#;
         let data: ProjectData = serde_json::from_str(json).unwrap();
         assert_eq!(data.skeleton.parts[0].limit, None);
-        assert_eq!(data.params, Params::default());
+        assert_eq!(data.params, Params { threshold: 30.0, ..Params::default() });
         assert_eq!(data.overlap, 1.0);
         assert!(data.motion.is_empty(), "no motion in an older project");
     }

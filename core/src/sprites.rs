@@ -8,8 +8,6 @@
 use crate::mask::Mask;
 use crate::skeleton::{Skeleton, distance_transform};
 use image::RgbaImage;
-use serde::Serialize;
-use std::path::Path;
 
 /// Disc radius never drops below this (px), so thin limbs still get a joint.
 const MIN_DISC_RADIUS: f32 = 3.0;
@@ -84,68 +82,6 @@ pub fn build_sprites(
             Sprite { part, image, origin: [bb.x, bb.y], pivot }
         })
         .collect()
-}
-
-#[derive(Serialize)]
-struct RigFile {
-    parts: Vec<RigPart>,
-}
-
-#[derive(Serialize)]
-struct RigPart {
-    name: String,
-    file: String,
-    parent: Option<String>,
-    /// Top-left of the PNG in the original drawing.
-    origin: [i32; 2],
-    size: [u32; 2],
-    /// Rotation center in the original drawing.
-    pivot: [f32; 2],
-    /// Rotation center relative to the PNG's top-left.
-    pivot_in_image: [f32; 2],
-}
-
-/// Write one PNG per part plus `rig.json` describing names, parents and pivots.
-pub fn write_parts(dir: &Path, sprites: &[Sprite], skel: &Skeleton) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let mut files: Vec<String> = Vec::new();
-    for s in sprites {
-        let base = file_stem(&skel.parts[s.part].name);
-        let mut file = format!("{base}.png");
-        let mut n = 2;
-        while files.contains(&file) {
-            file = format!("{base}_{n}.png");
-            n += 1;
-        }
-        if s.image.width() > 0 {
-            s.image.save(dir.join(&file)).map_err(std::io::Error::other)?;
-        }
-        files.push(file);
-    }
-    let parts = sprites
-        .iter()
-        .zip(&files)
-        .map(|(s, file)| {
-            let part = &skel.parts[s.part];
-            RigPart {
-                name: part.name.clone(),
-                file: file.clone(),
-                parent: part.parent.map(|p| skel.parts[p].name.clone()),
-                origin: s.origin,
-                size: [s.image.width(), s.image.height()],
-                pivot: s.pivot,
-                pivot_in_image: [s.pivot[0] - s.origin[0] as f32, s.pivot[1] - s.origin[1] as f32],
-            }
-        })
-        .collect();
-    let json = serde_json::to_string_pretty(&RigFile { parts }).map_err(std::io::Error::other)?;
-    std::fs::write(dir.join("rig.json"), json)
-}
-
-/// A part name made safe for a file name ("left arm" → "left_arm").
-fn file_stem(name: &str) -> String {
-    let s: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
-    if s.is_empty() { "part".into() } else { s }
 }
 
 #[cfg(test)]
@@ -242,18 +178,5 @@ mod tests {
         let with = sprite_masks(&fg, &skel, &sm.masks, 1.0);
         assert!(with[0].get(60, 85), "torso keeps a little of the head right above the neck");
         assert!(!with[0].get(40, 70) && !with[0].get(60, 60), "but not a head-sized chunk");
-    }
-
-    #[test]
-    fn writes_pngs_and_rig_json() {
-        let (img, fg, skel) = figure();
-        let sm = skeleton_masks(&fg, &skel);
-        let sprites = build_sprites(&img, &fg, &skel, &sm.masks, 1.0);
-        let dir = std::env::temp_dir().join(format!("anim_parts_test_{}", std::process::id()));
-        write_parts(&dir, &sprites, &skel).unwrap();
-        assert!(dir.join("torso.png").exists() && dir.join("left_arm.png").exists());
-        let json = std::fs::read_to_string(dir.join("rig.json")).unwrap();
-        assert!(json.contains("\"parent\": \"torso\""));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

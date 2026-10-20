@@ -4,7 +4,7 @@
 //! Shift+click to add to the selection, drag keys to move them in time,
 //! right-click for their ease, click empty space to move the playhead.
 
-use crate::state::{AppState, box_color};
+use crate::state::{AppState, part_color};
 use anim_core::motion::{KEY_EPSILON, MAX_FPS};
 use anim_core::{Ease, KeyRef, Motion, TrackId};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
@@ -182,7 +182,7 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     let (name, color) = match lane {
         Lane::All => ("All keys".to_string(), Color32::WHITE),
         Lane::Position => ("Position".to_string(), Color32::LIGHT_GRAY),
-        Lane::Part(i, name) => (name.clone(), box_color(*i)),
+        Lane::Part(i, name) => (name.clone(), part_color(*i)),
     };
     painter.rect_filled(label_rect, 0.0, Color32::from_gray(30));
     painter.text(

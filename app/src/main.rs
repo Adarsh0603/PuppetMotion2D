@@ -76,7 +76,7 @@ impl App {
         if pressed(ctx, Modifiers::COMMAND, Key::O) {
             self.state.open_dialog(ctx);
         }
-        if self.state.mode == state::Mode::Pose {
+        if self.state.step == state::Step::Animate {
             self.key_shortcuts(ctx);
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::B)) {
                 self.state.show_bones = !self.state.show_bones;
@@ -94,9 +94,9 @@ impl App {
                 self.state.step_frame(1);
             }
         }
-        // Space plays/pauses in Pose mode, unless it was held to pan (Space+drag).
+        // Space plays/pauses in Animate and Export, unless it was held to pan (Space+drag).
         if ctx.input(|i| i.key_released(Key::Space)) {
-            if self.state.mode == state::Mode::Pose && !self.state.space_panned {
+            if self.state.step.shows_pose() && !self.state.space_panned {
                 self.state.toggle_play();
             }
             self.state.space_panned = false;
@@ -105,7 +105,7 @@ impl App {
 }
 
 impl App {
-    /// Timeline keys in Pose mode: Ctrl+C copies the selected keys, Ctrl+X cuts
+    /// Timeline keys in the Animate step: Ctrl+C copies the selected keys, Ctrl+X cuts
     /// them, Ctrl+V pastes at the playhead, Delete removes them. egui turns
     /// Ctrl+C/X/V into Copy, Cut and Paste events (Paste carries the system
     /// clipboard's text).
@@ -148,10 +148,20 @@ impl eframe::App for App {
         self.shortcuts(&ctx);
         self.state.tick(&ctx);
 
-        egui::Panel::left("side").resizable(true).default_size(260.0).show(ui, |ui| {
+        export::poll(&ctx, &mut self.state);
+
+        egui::Panel::top("steps").show(ui, |ui| {
+            ui.add_space(4.0);
+            self.state.top_bar(ui);
+            ui.add_space(2.0);
+        });
+        egui::Panel::bottom("status").show(ui, |ui| {
+            self.state.status_bar(ui);
+        });
+        egui::Panel::left("side").resizable(true).default_size(280.0).show(ui, |ui| {
             self.state.side_panel(ui);
         });
-        if self.state.mode == state::Mode::Pose && self.state.doc.is_some() {
+        if self.state.step == state::Step::Animate && self.state.doc.is_some() {
             egui::Panel::bottom("timeline").resizable(true).default_size(160.0).min_size(70.0).max_size(600.0).show(ui, |ui| {
                 timeline::show(ui, &mut self.state);
             });
@@ -159,7 +169,6 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             canvas::show(ui, &mut self.state);
         });
-        export::show(&ctx, &mut self.state);
 
         let title = self.state.title();
         if title != self.title {

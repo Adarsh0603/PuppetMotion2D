@@ -1,7 +1,7 @@
 //! Undo/redo as a stack of snapshots of the editable state.
 //!
 //! Callers take a snapshot before an edit and hand it to `record` once the
-//! edit is done. Snapshots hold only user input (joints, boxes), never derived
+//! edit is done. Snapshots hold only user input (joints, pose, keys), never derived
 //! data like masks, so they are small and restoring one is a full recompute.
 
 pub struct History<T> {

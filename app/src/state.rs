@@ -1,9 +1,8 @@
 use crate::canvas::{Drag, View};
 use crate::export::ExportUi;
 use anim_core::{
-
-    Axis, Clip, Ease, History, KeyRef, Mask, Motion, Params, PartBox, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, foreground_mask,
-    load_project, part_masks, project, save_project, skeleton_masks, write_parts,
+    Clip, Ease, History, KeyRef, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    foreground_mask, load_project, project, save_project, skeleton_masks,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
@@ -28,20 +27,53 @@ pub const PALETTE: [[u8; 3]; 12] = [
 /// Undo steps kept per drawing.
 const UNDO_LIMIT: usize = 200;
 
-pub fn box_color(i: usize) -> Color32 {
+pub fn part_color(i: usize) -> Color32 {
     let [r, g, b] = PALETTE[i % PALETTE.len()];
     Color32::from_rgb(r, g, b)
 }
 
-/// What the canvas is for: placing joints, drawing boxes, or posing the cut-out parts.
+/// The four steps of making an animation, shown as a bar across the top.
+/// Each step has its own side panel and its own canvas tools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Boxes,
-    Joints,
-    Pose,
+pub enum Step {
+    /// Open a drawing and check the character is cut out cleanly.
+    Review,
+    /// Place the bones (and later the mesh).
+    Rig,
+    /// Pose on the timeline.
+    Animate,
+    /// Preview and write the animation to files.
+    Export,
 }
 
-/// What is selected in joints mode.
+impl Step {
+    pub const ALL: [Step; 4] = [Step::Review, Step::Rig, Step::Animate, Step::Export];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Step::Review => "Review",
+            Step::Rig => "Rig",
+            Step::Animate => "Animate",
+            Step::Export => "Export",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Step::Review => "Check the character is cut out cleanly, ready to rig",
+            Step::Rig => "Place the bones that move the character",
+            Step::Animate => "Pose the character over time",
+            Step::Export => "Save the animation as a GIF or frames",
+        }
+    }
+
+    /// Steps that show the posed character (and its motion) instead of the drawing.
+    pub fn shows_pose(self) -> bool {
+        matches!(self, Step::Animate | Step::Export)
+    }
+}
+
+/// What is selected in the Rig step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkelSel {
     None,
@@ -54,7 +86,6 @@ pub enum SkelSel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub skeleton: Skeleton,
-    pub boxes: Vec<PartBox>,
     pub pose: Pose,
     pub motion: Motion,
 }
@@ -70,31 +101,21 @@ pub struct KeyDrag {
     before: Option<Snapshot>,
 }
 
-pub struct BoxItem {
-    pub part: PartBox,
-    pub mask: Mask,
-    pub pixels: usize,
-}
-
 /// A loaded drawing and everything derived from it.
 pub struct Doc {
     pub image: RgbaImage,
     pub texture: TextureHandle,
     pub fg: Mask,
-    pub boxes: Vec<BoxItem>,
-    /// Pixels claimed by more than one box (before resolution).
-    pub overlap: Mask,
     pub skeleton: Skeleton,
-    /// Per-part masks and measured thickness from the skeleton.
+    /// Per-part masks from the skeleton.
     pub skel_masks: Vec<Mask>,
-    pub skel_radii: Vec<f32>,
     pub overlay: Option<TextureHandle>,
     pub overlay_dirty: bool,
     pub history: History<Snapshot>,
     /// File name without extension, used to name exported parts.
     pub name: String,
     pub pose: Pose,
-    /// Keyed animation. In Pose mode the shown pose is sampled from it at the playhead.
+    /// Keyed animation. In Animate and Export the shown pose is sampled from it at the playhead.
     pub motion: Motion,
     /// Cut-out parts and their textures (None for an empty part), rebuilt when
     /// `sprites_dirty` is set.
@@ -114,16 +135,14 @@ impl Doc {
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             skeleton: self.skeleton.clone(),
-            boxes: self.boxes.iter().map(|b| b.part).collect(),
             pose: self.pose.clone(),
             motion: self.motion.clone(),
         }
     }
 
-    /// Put back a snapshot's joints, boxes and pose (masks are recomputed by the caller).
+    /// Put back a snapshot's skeleton, pose and motion (masks are recomputed by the caller).
     fn restore(&mut self, s: Snapshot) {
         self.skeleton = s.skeleton;
-        self.boxes = s.boxes.into_iter().map(|part| BoxItem { part, mask: Mask::new(0, 0), pixels: 0 }).collect();
         self.pose = s.pose;
         self.motion = s.motion;
     }
@@ -138,28 +157,8 @@ impl Doc {
         egui::vec2(self.image.width() as f32, self.image.height() as f32)
     }
 
-    pub fn add_box(&mut self, rect: RectI) {
-        let part = PartBox { rect, axis: Axis::Auto };
-        self.boxes.push(BoxItem { part, mask: Mask::new(0, 0), pixels: 0 });
-    }
-
-    /// Recompute every part mask. Boxes affect each other through overlaps,
-    /// so any box change recomputes all of them (each is box-sized work).
-    pub fn recompute_parts(&mut self, params: &Params, resolve: bool) {
-        let parts: Vec<PartBox> = self.boxes.iter().map(|b| b.part).collect();
-        let pm = part_masks(&self.fg, &parts, params.keep_ratio, resolve);
-        for (b, m) in self.boxes.iter_mut().zip(pm.masks) {
-            b.pixels = m.count();
-            b.mask = m;
-        }
-        self.overlap = pm.overlap;
-        self.overlay_dirty = true;
-    }
-
     pub fn recompute_skeleton(&mut self) {
-        let sm = skeleton_masks(&self.fg, &self.skeleton);
-        self.skel_masks = sm.masks;
-        self.skel_radii = sm.radii;
+        self.skel_masks = skeleton_masks(&self.fg, &self.skeleton).masks;
         self.overlay_dirty = true;
         self.sprites_dirty = true;
     }
@@ -176,12 +175,11 @@ impl Doc {
 
 pub struct AppState {
     pub doc: Option<Doc>,
-    pub mode: Mode,
+    /// Which of the four steps is showing. Change it with `set_step`.
+    pub step: Step,
     pub params: Params,
     pub view: View,
     pub drag: Drag,
-    /// Pointer position (image pixels) during the current drag.
-    pub drag_pointer: Option<egui::Pos2>,
     /// State before the current drag, recorded for undo when the drag ends.
     pub drag_before: Option<Snapshot>,
     /// State before a typed or dragged field edit (a name, a limit), recorded
@@ -207,41 +205,31 @@ pub struct AppState {
     pub key_drag: Option<KeyDrag>,
     /// Last copied keys, used if the system clipboard has something else on it.
     pub clip: Option<Clip>,
-    /// Selected box (boxes mode).
-    pub selected: Option<usize>,
-    /// Selected joint or bone (joints mode).
+    /// Selected joint or bone (Rig step).
     pub skel_sel: SkelSel,
-    pub show_fg: bool,
+    /// Rig step: tint each part's pixels in its colour.
     pub show_parts: bool,
-    pub show_overlap: bool,
-    /// Give each overlap pixel to one part (nearest bone) instead of sharing it.
-    pub resolve_overlaps: bool,
-    /// Draw each skeleton part's measured thickness as a translucent capsule.
-    pub show_capsules: bool,
     /// Joint disc radius as a multiple of the child part's thickness (0 = no discs).
     pub overlap: f32,
-    /// Pose mode: show the original drawing faintly behind the posed parts.
+    /// Animate step: show the original drawing faintly behind the posed parts.
     pub show_ghost: bool,
-    /// Pose mode: draw bones and joint dots over the parts (B toggles).
+    /// Animate step: draw bones and joint dots over the parts (B toggles).
     pub show_bones: bool,
     pub status: String,
     /// Set when a new image is loaded so the canvas fits it on the next frame.
     pub fit_pending: bool,
-    /// The "Export animation" window and any export in progress.
+    /// Export settings and any export in progress.
     pub export: ExportUi,
-    /// Screen area of the canvas last frame (for centering windows on it).
-    pub canvas_rect: egui::Rect,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             doc: None,
-            mode: Mode::Joints,
+            step: Step::Review,
             params: Params::default(),
             view: View::default(),
             drag: Drag::None,
-            drag_pointer: None,
             drag_before: None,
             field_before: None,
             ik: true,
@@ -255,20 +243,14 @@ impl Default for AppState {
             key_sel: Vec::new(),
             key_drag: None,
             clip: None,
-            selected: None,
             skel_sel: SkelSel::None,
-            show_fg: false,
             show_parts: true,
-            show_overlap: true,
-            resolve_overlaps: true,
-            show_capsules: false,
             overlap: 1.0,
             show_ghost: false,
             show_bones: true,
-            status: "Open or drop an image to start.".into(),
+            status: "Open or drop a drawing to start.".into(),
             fit_pending: false,
             export: ExportUi::default(),
-            canvas_rect: egui::Rect::NOTHING,
         }
     }
 }
@@ -297,6 +279,8 @@ impl AppState {
         let Some(mut doc) = self.load_doc(ctx, &name, bytes, ext) else { return };
         doc.fit_skeleton();
         self.set_doc(doc);
+        // A new drawing starts at Import, so the cutout can be checked first.
+        self.set_step(Step::Review);
     }
 
     fn open_project(&mut self, ctx: &egui::Context, path: &Path) {
@@ -312,12 +296,36 @@ impl AppState {
         self.params = data.params;
         self.overlap = data.overlap;
         let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext) else { return };
-        doc.restore(Snapshot { skeleton: data.skeleton, boxes: data.boxes, pose: data.pose, motion: data.motion });
+        doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion });
         doc.recompute_skeleton();
-        doc.recompute_parts(&self.params, self.resolve_overlaps);
         doc.project_path = Some(path.to_path_buf());
         self.status = format!("Opened project {}", path.file_name().unwrap_or_default().to_string_lossy());
+        // A project picks up where it was left: animating if it has keys, else rigging.
+        let step = if doc.motion.is_empty() { Step::Rig } else { Step::Animate };
         self.set_doc(doc);
+        self.set_step(step);
+    }
+
+    /// Switch to `step`, ending any drag and refreshing what the canvas shows.
+    pub fn set_step(&mut self, step: Step) {
+        if step == self.step {
+            return;
+        }
+        if self.step.shows_pose() && !step.shows_pose() {
+            self.pause();
+        }
+        if step == Step::Export
+            && let Some(doc) = &self.doc
+        {
+            // Export at the timeline's frame rate unless changed here.
+            self.export.settings.fps = doc.motion.fps;
+        }
+        self.step = step;
+        self.drag = Drag::None;
+        self.drag_before = None;
+        if let Some(doc) = &mut self.doc {
+            doc.overlay_dirty = true;
+        }
     }
 
     /// Decode an image and build a fresh document for it (empty skeleton).
@@ -339,20 +347,15 @@ impl AppState {
             return None;
         }
         let texture = ctx.load_texture("drawing", to_color_image(&image), TextureOptions::LINEAR);
-        let t = std::time::Instant::now();
         let fg = foreground_mask(&image, &self.params);
-        self.status = format!("{name} — {}×{}, foreground in {} ms", image.width(), image.height(), t.elapsed().as_millis());
-        let overlap = Mask::new(image.width(), image.height());
+        self.status = format!("Opened {name} ({}×{})", image.width(), image.height());
         let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy().into_owned();
         Some(Doc {
             image,
             texture,
             fg,
-            boxes: Vec::new(),
-            overlap,
             skeleton: Skeleton::empty(),
             skel_masks: Vec::new(),
-            skel_radii: Vec::new(),
             overlay: None,
             overlay_dirty: true,
             history: History::new(UNDO_LIMIT),
@@ -395,7 +398,7 @@ impl AppState {
         // While a pose drag is in progress the dragged pose wins; otherwise
         // show the motion at the playhead (if there is one).
         let posing = matches!(self.drag, Drag::PoseRotate { .. } | Drag::PoseMove);
-        if self.mode == Mode::Pose && !posing && !self.unkeyed_pose && !doc.motion.is_empty() {
+        if self.step.shows_pose() && !posing && !self.unkeyed_pose && !doc.motion.is_empty() {
             let t = if self.playing {
                 // Hold each frame until the next one starts, exactly like the export.
                 (self.playhead * doc.motion.fps.max(1) as f32).floor() / doc.motion.fps.max(1) as f32
@@ -604,7 +607,6 @@ impl AppState {
         self.key_sel.clear();
         self.playing = false;
         self.doc = Some(doc);
-        self.selected = None;
         self.skel_sel = SkelSel::None;
         self.drag = Drag::None;
         self.drag_before = None;
@@ -644,7 +646,6 @@ impl AppState {
             params: self.params,
             skeleton: doc.skeleton.clone(),
             pose: doc.pose.clone(),
-            boxes: doc.boxes.iter().map(|b| b.part).collect(),
             overlap: self.overlap,
             motion: doc.motion.clone(),
         };
@@ -679,12 +680,6 @@ impl AppState {
         }
     }
 
-    pub fn recompute_parts(&mut self) {
-        if let Some(doc) = &mut self.doc {
-            doc.recompute_parts(&self.params, self.resolve_overlaps);
-        }
-    }
-
     pub fn snapshot(&self) -> Option<Snapshot> {
         self.doc.as_ref().map(Doc::snapshot)
     }
@@ -716,7 +711,6 @@ impl AppState {
             doc.restore(s);
             doc.recompute_skeleton();
         }
-        self.recompute_parts();
         self.fix_selection();
     }
 
@@ -739,9 +733,6 @@ impl AppState {
     /// Drop selections that no longer point at anything.
     fn fix_selection(&mut self) {
         let Some(doc) = &self.doc else { return };
-        if self.selected.is_some_and(|i| i >= doc.boxes.len()) {
-            self.selected = None;
-        }
         self.key_sel.retain(|r| doc.motion.has_key(r));
         let valid = match self.skel_sel {
             SkelSel::None => true,
@@ -783,19 +774,7 @@ impl AppState {
             .collect();
     }
 
-    /// Ask for a folder and write one PNG per part plus rig.json into `<folder>/<image>_parts/`.
-    fn export_parts(&mut self, ctx: &egui::Context) {
-        self.refresh_sprites(ctx);
-        let Some(doc) = &self.doc else { return };
-        let Some(folder) = rfd::FileDialog::new().set_title("Export parts into…").pick_folder() else { return };
-        let dir = folder.join(format!("{}_parts", doc.name));
-        self.status = match write_parts(&dir, &doc.sprites, &doc.skeleton) {
-            Ok(()) => format!("Exported {} parts to {}", doc.sprites.len(), dir.display()),
-            Err(e) => format!("Export failed: {e}"),
-        };
-    }
-
-    /// Delete the selected joint or bone (joints mode).
+    /// Delete the selected joint or bone (Rig step).
     pub fn delete_skel_selection(&mut self) {
         match std::mem::replace(&mut self.skel_sel, SkelSel::None) {
             SkelSel::Joint(j) => self.edit_skeleton(|s| s.remove_joint(j)),
@@ -804,27 +783,8 @@ impl AppState {
         }
     }
 
-    pub fn delete_selected(&mut self) {
-        let before = self.snapshot();
-        if let (Some(doc), Some(i)) = (&mut self.doc, self.selected.take()) {
-            doc.boxes.remove(i);
-            self.recompute_parts();
-            self.commit(before);
-        }
-    }
-
-    /// Cycle the bone axis of the selected box.
-    pub fn cycle_axis(&mut self) {
-        let before = self.snapshot();
-        if let (Some(doc), Some(i)) = (&mut self.doc, self.selected) {
-            let axis = &mut doc.boxes[i].part.axis;
-            *axis = axis.next();
-            self.recompute_parts();
-            self.commit(before);
-        }
-    }
-
-    /// Rebuild the tint overlay texture if anything changed.
+    /// Rebuild the tint overlay texture if anything changed. Import dims the
+    /// background so the found character stands out; Rig tints each part.
     pub fn refresh_overlay(&mut self, ctx: &egui::Context) {
         let Some(doc) = &mut self.doc else { return };
         if !doc.overlay_dirty {
@@ -832,21 +792,15 @@ impl AppState {
         }
         doc.overlay_dirty = false;
         let mut img = RgbaImage::new(doc.image.width(), doc.image.height());
-        if self.show_fg {
-            doc.fg.paint_onto(&mut img, [255, 0, 200, 90]);
-        }
-        if self.show_parts {
-            let masks: Vec<&Mask> = match self.mode {
-                Mode::Boxes => doc.boxes.iter().map(|b| &b.mask).collect(),
-                Mode::Joints | Mode::Pose => doc.skel_masks.iter().collect(),
-            };
-            for (i, m) in masks.into_iter().enumerate() {
-                let [r, g, bl] = PALETTE[i % PALETTE.len()];
-                m.paint_onto(&mut img, [r, g, bl, 140]);
+        match self.step {
+            Step::Review => doc.fg.inverted().paint_onto(&mut img, [30, 30, 36, 210]),
+            Step::Rig if self.show_parts => {
+                for (i, m) in doc.skel_masks.iter().enumerate() {
+                    let [r, g, b] = PALETTE[i % PALETTE.len()];
+                    m.paint_onto(&mut img, [r, g, b, 140]);
+                }
             }
-        }
-        if self.show_overlap && self.mode == Mode::Boxes {
-            doc.overlap.and(&doc.fg).paint_onto(&mut img, [255, 120, 0, 230]);
+            _ => {}
         }
         let color = to_color_image(&img);
         match &mut doc.overlay {
@@ -855,134 +809,147 @@ impl AppState {
         }
     }
 
-    pub fn side_panel(&mut self, ui: &mut egui::Ui) {
-        // ui.heading("Animator");
+    /// The bar across the top: file buttons, the four steps, undo/redo.
+    pub fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Open…").on_hover_text("An image or a project (Ctrl+O)").clicked() {
+            let has_doc = self.doc.is_some();
+            if ui.button("Open…").on_hover_text("A drawing or a project (Ctrl+O)").clicked() {
                 self.open_dialog(ui.ctx());
             }
-            let has_doc = self.doc.is_some();
             if ui.add_enabled(has_doc, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked() {
                 self.save();
             }
-            if ui.add_enabled(has_doc, egui::Button::new("Save As…")).clicked() {
+            if ui.add_enabled(has_doc, egui::Button::new("Save As…")).on_hover_text("Ctrl+Shift+S").clicked() {
                 self.save_as();
             }
-        });
-        if self.doc.as_ref().is_some_and(|d| d.dirty) {
-            ui.label(egui::RichText::new("● unsaved changes").color(Color32::from_rgb(255, 190, 40)));
-        }
-        ui.label(&self.status);
-        if let Some(doc) = &self.doc {
-            let (can_undo, can_redo) = (doc.history.can_undo(), doc.history.can_redo());
-            ui.horizontal(|ui| {
-                if ui.add_enabled(can_undo, egui::Button::new("⟲ Undo")).on_hover_text("Ctrl+Z").clicked() {
-                    self.undo();
+            ui.separator();
+            for (i, step) in Step::ALL.into_iter().enumerate() {
+                if i > 0 {
+                    ui.label(egui::RichText::new("›").weak());
                 }
-                if ui.add_enabled(can_redo, egui::Button::new("⟳ Redo")).on_hover_text("Ctrl+Shift+Z").clicked() {
-                    self.redo();
+                let text = egui::RichText::new(step.label()).size(15.0).strong();
+                let button = egui::Button::new(text).selected(self.step == step);
+                // Everything after Review needs a drawing.
+                let enabled = has_doc || step == Step::Review;
+                if ui.add_enabled(enabled, button).on_hover_text(step.hint()).clicked() {
+                    self.set_step(step);
                 }
-            });
-        }
-        ui.separator();
-
-        let mode = self.mode;
-        ui.horizontal(|ui| {
-            ui.strong("Mode");
-            ui.selectable_value(&mut self.mode, Mode::Joints, "Joints");
-            ui.selectable_value(&mut self.mode, Mode::Pose, "Pose");
-            ui.selectable_value(&mut self.mode, Mode::Boxes, "Boxes");
-        });
-        if mode != self.mode {
-            self.drag = Drag::None;
-            if let Some(doc) = &mut self.doc {
-                doc.overlay_dirty = true;
             }
-        }
-        ui.separator();
+            ui.separator();
+            let (can_undo, can_redo) = self.doc.as_ref().map_or((false, false), |d| (d.history.can_undo(), d.history.can_redo()));
+            if ui.add_enabled(can_undo, egui::Button::new("⟲ Undo")).on_hover_text("Ctrl+Z").clicked() {
+                self.undo();
+            }
+            if ui.add_enabled(can_redo, egui::Button::new("⟳ Redo")).on_hover_text("Ctrl+Shift+Z").clicked() {
+                self.redo();
+            }
+            if self.doc.as_ref().is_some_and(|d| d.dirty) {
+                ui.label(egui::RichText::new("● unsaved").color(Color32::from_rgb(255, 190, 40)))
+                    .on_hover_text("Changes since the last save (Ctrl+S)");
+            }
+        });
+    }
 
-        ui.strong("Cutout");
+    /// The line along the bottom of the window: what just happened.
+    pub fn status_bar(&self, ui: &mut egui::Ui) {
+        ui.label(&self.status);
+    }
+
+    /// The side panel: the current step's title and controls.
+    pub fn side_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading(self.step.label());
+        ui.label(egui::RichText::new(self.step.hint()).weak());
+        ui.separator();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.step {
+            Step::Review => self.review_section(ui),
+            Step::Rig => self.rig_section(ui),
+            Step::Animate => self.animate_section(ui),
+            Step::Export => crate::export::panel(ui, self),
+        });
+    }
+
+    /// The shortcut list at the bottom of a step's panel: a little larger than
+    /// egui's small text so it's easy to read.
+    fn shortcut_help(ui: &mut egui::Ui, text: &str) {
+        ui.label(egui::RichText::new(text).size(11.5).weak());
+    }
+
+    fn review_section(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = &self.doc else {
+            ui.label("Open a drawing of one character on a plain background. A PNG with a transparent background works best.");
+            ui.add_space(6.0);
+            let open = egui::Button::new(egui::RichText::new("Open a drawing…").size(15.0).strong());
+            if ui.add(open.min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
+                self.open_dialog(ui.ctx());
+            }
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("Or drop a file on the window. Saved projects (.pm2d) open the same way.").weak());
+            return;
+        };
+        ui.label(format!("{}  ·  {}×{} px", doc.name, doc.image.width(), doc.image.height()));
+        ui.add_space(4.0);
+        ui.label("Your character stays bright and the background is dimmed.");
+        ui.label(
+            egui::RichText::new("If some background is included, or part of the character is dimmed, fine-tune the cutout below.")
+                .weak(),
+        );
+        ui.add_space(4.0);
         let before = self.params;
-        ui.add(egui::Slider::new(&mut self.params.threshold, 5.0..=150.0).text("bg threshold"));
-        ui.add(egui::Slider::new(&mut self.params.corner_patch, 2..=64).text("corner patch"));
-        ui.add(egui::Slider::new(&mut self.params.min_area, 0..=5000).logarithmic(true).text("min area"));
-        ui.add(egui::Slider::new(&mut self.params.keep_ratio, 0.0..=1.0).text("keep ratio"));
-        ui.add(egui::Slider::new(&mut self.params.gap_close, 0..=20).text("close gaps (px)"));
-        if ui.button("Reset").clicked() {
-            self.params = Params::default();
-        }
+        egui::CollapsingHeader::new("Fine-tune cutout").default_open(false).show(ui, |ui| {
+            ui.add(egui::Slider::new(&mut self.params.threshold, 5.0..=150.0).text("background tolerance"))
+                .on_hover_text("How different from the background a colour must be to count as the character");
+            ui.add(egui::Slider::new(&mut self.params.gap_close, 0..=20).text("close outline gaps (px)"))
+                .on_hover_text("Seals small breaks in a sketchy outline so the background can't leak inside");
+            ui.add(egui::Slider::new(&mut self.params.min_area, 0..=5000).logarithmic(true).text("ignore specks under (px)"))
+                .on_hover_text("Drops tiny dots of dirt or noise");
+            ui.add(egui::Slider::new(&mut self.params.corner_patch, 2..=64).text("corner sample (px)"))
+                .on_hover_text("The background colour is read from squares this size in each corner");
+            if ui.button("Reset").clicked() {
+                self.params = Params::default();
+            }
+        });
         if self.params != before
             && let Some(doc) = &mut self.doc
         {
             doc.fg = foreground_mask(&doc.image, &self.params);
             doc.dirty = true;
             doc.recompute_skeleton();
-            self.recompute_parts();
-        }
-
-        let toggles = (self.show_fg, self.show_parts, self.show_overlap);
-        match self.mode {
-            Mode::Boxes => {
-                ui.checkbox(&mut self.show_fg, "Show full foreground");
-                ui.checkbox(&mut self.show_parts, "Show part masks");
-                ui.checkbox(&mut self.show_overlap, "Show overlaps (orange)");
-            }
-            Mode::Joints => {
-                ui.checkbox(&mut self.show_fg, "Show full foreground");
-                ui.checkbox(&mut self.show_parts, "Show part masks");
-                ui.checkbox(&mut self.show_capsules, "Show part thickness");
-            }
-            Mode::Pose => {}
-        }
-        if toggles != (self.show_fg, self.show_parts, self.show_overlap)
-            && let Some(doc) = &mut self.doc
-        {
-            doc.overlay_dirty = true;
-        }
-        ui.separator();
-
-        match self.mode {
-            Mode::Boxes => self.boxes_section(ui),
-            Mode::Joints => self.joints_section(ui),
-            Mode::Pose => self.pose_section(ui),
         }
     }
 
-    fn pose_section(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Pose");
+    fn animate_section(&mut self, ui: &mut egui::Ui) {
         if self.doc.is_none() {
             return;
         }
-        if ui.button("Reset pose").on_hover_text("Back to as drawn (with keys: removes the keys at the playhead)").clicked() {
+        ui.label("Drag the white dots to pose. Press K (or Keep pose) to save the pose at this frame, then move along the timeline and pose again.");
+        ui.add_space(4.0);
+        if ui.button("Reset pose").on_hover_text("Back to as drawn (removes the keys at this frame)").clicked() {
             let before = self.snapshot();
+            let t = self.key_time();
             if let Some(doc) = &mut self.doc {
-                doc.motion.remove_keys_at(self.playhead);
+                doc.motion.remove_keys_at(t);
                 doc.reset_pose();
             }
             self.commit(before);
         }
-        let overlap = self.overlap;
-        ui.add(egui::Slider::new(&mut self.overlap, 0.0..=2.0).text("joint overlap"))
-            .on_hover_text("How big a round blob each part keeps at its joints so rotating a child leaves no gap");
-        if overlap != self.overlap
-            && let Some(doc) = &mut self.doc
-        {
-            doc.sprites_dirty = true;
-            doc.dirty = true;
-        }
-        ui.checkbox(&mut self.ik, "IK: drag a hand or foot to move the whole limb");
+        ui.checkbox(&mut self.ik, "Move whole limbs (IK)")
+            .on_hover_text("Dragging a hand or foot bends the elbow or knee to follow");
         ui.checkbox(&mut self.show_bones, "Show bones").on_hover_text("B: hide them to watch just the animation");
         ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
-        ui.horizontal(|ui| {
-            if ui.button("Export animation…").on_hover_text("Render the motion as a GIF or a PNG sequence").clicked() {
-                self.export.open = true;
-            }
-            if ui.button("Export parts…").on_hover_text("One PNG per part plus rig.json").clicked() {
-                self.export_parts(ui.ctx());
+        egui::CollapsingHeader::new("Fine-tune joints").default_open(false).show(ui, |ui| {
+            let overlap = self.overlap;
+            ui.add(egui::Slider::new(&mut self.overlap, 0.0..=2.0).text("joint fill"))
+                .on_hover_text("How big a round patch each part keeps at its joints, so turning a part leaves no gap");
+            if overlap != self.overlap
+                && let Some(doc) = &mut self.doc
+            {
+                doc.sprites_dirty = true;
+                doc.dirty = true;
             }
         });
         ui.separator();
-        ui.small(
+        Self::shortcut_help(
+            ui,
             "Drag a hand or foot: the whole limb follows (IK)\n\
              Drag any other bone end: rotate that part (children follow)\n\
              Drag the root's start dot: move the whole figure\n\
@@ -993,10 +960,18 @@ impl AppState {
         );
     }
 
-    fn joints_section(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Skeleton");
+    fn rig_section(&mut self, ui: &mut egui::Ui) {
         if self.doc.is_none() {
             return;
+        }
+        ui.label("Drag the dots onto the character's joints. Each coloured area moves with its bone.");
+        ui.add_space(4.0);
+        let show_parts = self.show_parts;
+        ui.checkbox(&mut self.show_parts, "Show part colours");
+        if show_parts != self.show_parts
+            && let Some(doc) = &mut self.doc
+        {
+            doc.overlay_dirty = true;
         }
         ui.horizontal(|ui| {
             if ui.button("Person template").on_hover_text("Replace with a stick person fitted to the figure").clicked() {
@@ -1018,7 +993,7 @@ impl AppState {
         }
         let mut clicked = None;
         for (i, depth) in doc.skeleton.tree_order() {
-            let text = egui::RichText::new(&doc.skeleton.parts[i].name).color(box_color(i));
+            let text = egui::RichText::new(&doc.skeleton.parts[i].name).color(part_color(i));
             ui.horizontal(|ui| {
                 ui.add_space(16.0 * depth as f32);
                 if ui.selectable_label(self.skel_sel == SkelSel::Part(i), text).clicked() {
@@ -1066,7 +1041,8 @@ impl AppState {
         }
 
         ui.separator();
-        ui.small(
+        Self::shortcut_help(
+            ui,
             "Drag a joint: move it\n\
              Shift+drag from a joint: grow a new bone\n\
              Shift+drag on empty space: start a new bone\n\
@@ -1143,57 +1119,6 @@ impl AppState {
         }
     }
 
-    fn boxes_section(&mut self, ui: &mut egui::Ui) {
-        let resolve = self.resolve_overlaps;
-        ui.checkbox(&mut self.resolve_overlaps, "Resolve overlaps (nearest bone)");
-        if resolve != self.resolve_overlaps {
-            self.recompute_parts();
-        }
-        ui.strong("Boxes");
-        if let Some(doc) = &self.doc {
-            if doc.boxes.is_empty() {
-                ui.label("Drag on the drawing to add a box.");
-            } else {
-                let shared = doc.overlap.and(&doc.fg).count();
-                ui.label(format!("Overlap: {shared} px claimed by 2+ boxes"));
-            }
-            let mut clicked = None;
-            for (i, b) in doc.boxes.iter().enumerate() {
-                let r = &b.part.rect;
-                let text = egui::RichText::new(format!(
-                    "Box {}  {}×{}  bone {}  mask {} px",
-                    i + 1,
-                    r.w,
-                    r.h,
-                    b.part.axis.label(),
-                    b.pixels
-                ))
-                .color(box_color(i));
-                if ui.selectable_label(self.selected == Some(i), text).clicked() {
-                    clicked = Some(i);
-                }
-            }
-            if clicked.is_some() {
-                self.selected = clicked;
-            }
-        }
-        if self.selected.is_some() {
-            ui.horizontal(|ui| {
-                if ui.button("Cycle bone (A)").clicked() {
-                    self.cycle_axis();
-                }
-                if ui.button("Delete box").clicked() {
-                    self.delete_selected();
-                }
-            });
-        }
-        ui.separator();
-        ui.small(
-            "Left-drag: new box / move box\nCorner handles: resize\nMiddle-drag or Space+drag: pan\n\
-             Scroll: zoom   F: fit   A: cycle bone   Delete: remove box\n\
-             Ctrl+Z: undo   Ctrl+Shift+Z: redo",
-        );
-    }
 }
 
 pub fn to_color_image(img: &RgbaImage) -> ColorImage {
@@ -1310,7 +1235,7 @@ mod tests {
     #[test]
     fn posing_auto_keys_and_plays_back() {
         let mut state = open_sample();
-        state.mode = Mode::Pose;
+        state.set_step(Step::Animate);
         state.auto_key = true;
         let forearm = {
             let s = &state.doc.as_ref().unwrap().skeleton;
@@ -1357,7 +1282,7 @@ mod tests {
     fn auto_key_off_previews_until_keyed() {
         let mut state = open_sample();
         let ctx = egui::Context::default();
-        state.mode = Mode::Pose;
+        state.set_step(Step::Animate);
         assert!(!state.auto_key, "off by default");
         let head = 0;
 
@@ -1399,7 +1324,7 @@ mod tests {
     fn frames_step_snap_and_key_on_the_grid() {
         let mut state = open_sample();
         let ctx = egui::Context::default();
-        state.mode = Mode::Pose;
+        state.set_step(Step::Animate);
         state.doc.as_mut().unwrap().motion.fps = 10;
 
         // Stepping moves one frame and stops at both ends.
@@ -1435,7 +1360,7 @@ mod tests {
     #[test]
     fn dragging_keys_retimes_them_and_ease_is_set_per_key() {
         let mut state = open_sample();
-        state.mode = Mode::Pose;
+        state.set_step(Step::Animate);
         state.playhead = 0.0;
         state.key_all();
         state.playhead = 1.0;
@@ -1534,18 +1459,27 @@ mod tests {
     }
 
     #[test]
-    fn box_edits_undo() {
+    fn steps_follow_the_workflow() {
         let mut state = open_sample();
-        let before = state.snapshot();
-        state.doc.as_mut().unwrap().add_box(RectI::new(10, 10, 50, 50));
-        state.recompute_parts();
-        state.commit(before);
-        state.selected = Some(0);
-        state.delete_selected();
-        assert!(state.doc.as_ref().unwrap().boxes.is_empty());
-        state.undo();
-        assert_eq!(state.doc.as_ref().unwrap().boxes.len(), 1);
-        state.undo();
-        assert!(state.doc.as_ref().unwrap().boxes.is_empty());
+        assert_eq!(state.step, Step::Review, "a new drawing starts at Review");
+
+        // Leaving the posed steps stops playback; Export starts at the timeline's fps.
+        state.set_step(Step::Animate);
+        state.doc.as_mut().unwrap().motion.fps = 12;
+        state.playing = true;
+        state.set_step(Step::Export);
+        assert!(state.playing, "previewing carries on into Export");
+        assert_eq!(state.export.settings.fps, 12);
+        state.set_step(Step::Rig);
+        assert!(!state.playing);
+
+        // A saved project reopens where work left off: Animate once it has keys.
+        state.key_all();
+        let path = std::env::temp_dir().join(format!("pm2d_steps_test_{}.pm2d", std::process::id()));
+        state.save_to(&path);
+        let mut fresh = AppState::default();
+        fresh.open(&egui::Context::default(), &path);
+        assert_eq!(fresh.step, Step::Animate);
+        std::fs::remove_file(&path).unwrap();
     }
 }

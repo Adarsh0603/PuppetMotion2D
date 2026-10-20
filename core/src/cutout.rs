@@ -1,8 +1,7 @@
-//! Classical cutout: background removal plus a user box per body part.
+//! Classical cutout: finding the character by removing the background.
 
 use crate::background::{BgModel, dist2, estimate_background};
-use crate::components::{fill_holes, flood_from_border, label, remove_small};
-use crate::geom::RectI;
+use crate::components::{fill_holes, flood_from_border, remove_small};
 use crate::mask::Mask;
 use image::RgbaImage;
 
@@ -15,8 +14,6 @@ pub struct Params {
     pub corner_patch: u32,
     /// Foreground specks smaller than this (pixels) are dropped.
     pub min_area: usize,
-    /// In a part box, keep components at least this fraction of the largest one.
-    pub keep_ratio: f32,
     /// Seal outline breaks up to about twice this many pixels wide, so the
     /// background can't flood inside a sketchy outline. 0 disables it.
     pub gap_close: u32,
@@ -24,7 +21,7 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
-        Self { threshold: 40.0, corner_patch: 8, min_area: 64, keep_ratio: 0.2, gap_close: 3 }
+        Self { threshold: 40.0, corner_patch: 8, min_area: 64, gap_close: 3 }
     }
 }
 
@@ -72,46 +69,10 @@ pub fn foreground_mask(img: &RgbaImage, p: &Params) -> Mask {
     remove_small(&fg, p.min_area)
 }
 
-/// Mask for one body part: the foreground inside `rect`, keeping the dominant
-/// component(s) so stray bits of neighbouring parts are dropped.
-pub fn part_mask(fg: &Mask, rect: &RectI, p: &Params) -> Mask {
-    keep_dominant(fg, rect, p.keep_ratio)
-}
-
-/// Pixels of `mask` inside `rect`, keeping only the largest component and any
-/// component at least `keep_ratio` of its size.
-pub fn keep_dominant(mask: &Mask, rect: &RectI, keep_ratio: f32) -> Mask {
-    let r = rect.clamp_to(mask.w, mask.h);
-    let mut out = Mask::new(mask.w, mask.h);
-    if r.is_empty() {
-        return out;
-    }
-    // Label only the box-sized crop: cost scales with the box, not the image.
-    let mut crop = Mask::new(r.w as u32, r.h as u32);
-    for y in 0..r.h as u32 {
-        for x in 0..r.w as u32 {
-            crop.set(x, y, mask.get(x + r.x as u32, y + r.y as u32));
-        }
-    }
-    let l = label(&crop);
-    let Some(&largest) = l.sizes.iter().max() else {
-        return out;
-    };
-    let min_keep = (largest as f32 * keep_ratio).ceil() as usize;
-    for y in 0..crop.h {
-        for x in 0..crop.w {
-            let lab = l.labels[crop.idx(x, y)];
-            if lab != 0 && l.sizes[lab as usize - 1] >= min_keep {
-                out.set(x + r.x as u32, y + r.y as u32, true);
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::RectI;
     use image::Rgba;
 
     const WHITE: Rgba<u8> = Rgba([255, 255, 255, 255]);
@@ -189,18 +150,5 @@ mod tests {
         assert!(fg.get(50, 50));
         assert!(!fg.get(1, 1), "speck is removed by min_area");
         assert!(fg.count() < 1400);
-    }
-
-    #[test]
-    fn part_box_keeps_dominant_shape() {
-        let mut img = RgbaImage::from_pixel(120, 100, WHITE);
-        draw_disc(&mut img, 40, 50, 25, INK); // "arm"
-        draw_disc(&mut img, 100, 50, 25, INK); // "torso" poking into the box
-        let p = Params::default();
-        let fg = foreground_mask(&img, &p);
-        let part = part_mask(&fg, &RectI::new(10, 20, 70, 60), &p);
-        assert!(part.get(40, 50));
-        assert!(!part.get(78, 50), "sliver of the neighbour is dropped");
-        assert!(!part.get(100, 50));
     }
 }
