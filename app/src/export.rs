@@ -1,6 +1,7 @@
 //! The Export step: settings in the side panel, a preview of the framed area
 //! on the canvas, and rendering on a background thread with a progress bar.
 
+use crate::panel::card;
 use crate::state::AppState;
 use anim_core::{Pose, RectI};
 use anim_export::{Format, Job, Outcome, Settings, frame_area, frame_times, output_size};
@@ -50,75 +51,81 @@ pub fn panel(ui: &mut egui::Ui, state: &mut AppState) {
     }
     state.refresh_sprites(ui.ctx());
     if let Some(r) = &state.export.running {
-        let done = r.done.load(Ordering::Relaxed);
-        ui.label(format!("Exporting to {}", r.out.display()));
-        ui.add(egui::ProgressBar::new(done as f32 / r.total.max(1) as f32).text(format!("frame {done} of {}", r.total)));
-        if ui.button("Cancel").clicked() {
-            r.cancel.store(true, Ordering::Relaxed);
-        }
+        card(ui, "Exporting", |ui| {
+            let done = r.done.load(Ordering::Relaxed);
+            ui.label(egui::RichText::new(r.out.display().to_string()).weak());
+            ui.add(egui::ProgressBar::new(done as f32 / r.total.max(1) as f32).text(format!("frame {done} of {}", r.total)));
+            if ui.button("Cancel").clicked() {
+                r.cancel.store(true, Ordering::Relaxed);
+            }
+        });
         return;
     }
 
-    let play = if state.playing { "⏸ Stop preview" } else { "▶ Preview" };
-    if ui.button(play).on_hover_text("Space: play the animation as it will be exported").clicked() {
-        state.toggle_play();
-    }
-    ui.add_space(6.0);
-
-    let s = &mut state.export.settings;
-    egui::Grid::new("export settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-        ui.label("Frame rate");
-        ui.add(egui::DragValue::new(&mut s.fps).range(1..=60).suffix(" fps"))
-            .on_hover_text("Starts at the timeline's frame rate");
-        ui.end_row();
-        ui.label("Size");
-        let mut percent = s.scale * 100.0;
-        ui.add(egui::DragValue::new(&mut percent).range(10.0..=400.0).speed(1.0).suffix(" %"));
-        s.scale = percent / 100.0;
-        ui.end_row();
-        ui.label("Background");
-        ui.horizontal(|ui| {
-            let mut transparent = s.background.is_none();
-            ui.checkbox(&mut transparent, "Transparent");
-            match (transparent, &mut s.background) {
-                (true, bg) => *bg = None,
-                (false, None) => s.background = Some([255, 255, 255]),
-                (false, Some(rgb)) => {
-                    ui.color_edit_button_srgb(rgb);
-                }
-            }
-        });
-        ui.end_row();
-    });
-    ui.checkbox(&mut s.crop, "Crop to the moving character")
-        .on_hover_text("The dashed box on the canvas. Off: every frame is the size of the whole drawing.");
-
-    let settings = *s;
+    let settings = state.export.settings;
     let poses = frame_poses(state, settings.fps);
     let doc = state.doc.as_ref().unwrap();
     let area = frame_area(&doc.sprites, &doc.skeleton, &poses, [doc.image.width(), doc.image.height()], settings.crop);
     let [w, h] = output_size(area, settings.scale);
-    ui.add_space(4.0);
-    if doc.motion.is_empty() {
-        ui.label("No keys yet, so this exports the current pose as a single frame.");
-    }
-    ui.label(format!("{} frames, {w}×{h} px", poses.len()));
-    ui.add_space(6.0);
-    let buttons = [
-        (Format::Gif, "Export GIF…", "One looping animated GIF, for sharing and previews"),
-        (Format::Png, "Export frames…", "One PNG per frame in a folder, for game engines"),
-    ];
-    for (format, label, hint) in buttons {
-        let text = egui::RichText::new(label).size(15.0).strong();
-        let button = egui::Button::new(text).min_size(egui::vec2(ui.available_width(), 30.0));
-        if ui.add(button).on_hover_text(hint).clicked() {
-            state.export.settings.format = format;
-            begin(state);
+    let no_keys = doc.motion.is_empty();
+    card(ui, "Preview", |ui| {
+        let play = if state.playing { "⏸ Stop preview" } else { "▶ Preview" };
+        if ui.button(play).on_hover_text("Space: play the animation as it will be exported").clicked() {
+            state.toggle_play();
         }
-    }
-    if settings.background.is_none() {
-        ui.label(egui::RichText::new("Note: GIF has no soft edges, so semi-transparent pixels become solid or clear.").weak());
-    }
+        ui.label(format!("{} frames, {w} × {h} px", poses.len()));
+        if no_keys {
+            ui.label(egui::RichText::new("No keys yet, so this exports the current pose as a single frame.").weak());
+        }
+    });
+
+    card(ui, "Settings", |ui| {
+        let s = &mut state.export.settings;
+        egui::Grid::new("export settings").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+            ui.label("Frame rate");
+            ui.add(egui::DragValue::new(&mut s.fps).range(1..=60).suffix(" fps"))
+                .on_hover_text("Starts at the timeline's frame rate");
+            ui.end_row();
+            ui.label("Size");
+            let mut percent = s.scale * 100.0;
+            ui.add(egui::DragValue::new(&mut percent).range(10.0..=400.0).speed(1.0).suffix(" %"));
+            s.scale = percent / 100.0;
+            ui.end_row();
+            ui.label("Background");
+            ui.horizontal(|ui| {
+                let mut transparent = s.background.is_none();
+                ui.checkbox(&mut transparent, "Transparent");
+                match (transparent, &mut s.background) {
+                    (true, bg) => *bg = None,
+                    (false, None) => s.background = Some([255, 255, 255]),
+                    (false, Some(rgb)) => {
+                        ui.color_edit_button_srgb(rgb);
+                    }
+                }
+            });
+            ui.end_row();
+        });
+        ui.checkbox(&mut s.crop, "Crop to the moving character")
+            .on_hover_text("The dashed box on the canvas. Off: every frame is the size of the whole drawing.");
+    });
+
+    card(ui, "Save", |ui| {
+        let buttons = [
+            (Format::Gif, "Export GIF…", "One looping animated GIF, for sharing and previews"),
+            (Format::Png, "Export frames…", "One PNG per frame in a folder, for game engines"),
+        ];
+        for (format, label, hint) in buttons {
+            let text = egui::RichText::new(label).size(15.0).strong();
+            let button = egui::Button::new(text).min_size(egui::vec2(ui.available_width(), 30.0));
+            if ui.add(button).on_hover_text(hint).clicked() {
+                state.export.settings.format = format;
+                begin(state);
+            }
+        }
+        if settings.background.is_none() {
+            ui.label(egui::RichText::new("GIF has no soft edges, so semi-transparent pixels become solid or clear.").weak());
+        }
+    });
 }
 
 /// Open the file manager showing what was just exported: the GIF selected

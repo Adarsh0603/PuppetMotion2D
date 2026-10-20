@@ -12,6 +12,8 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 const LABEL_WIDTH: f32 = 130.0;
 const SUMMARY_HEIGHT: f32 = 24.0;
 const ROW_HEIGHT: f32 = 20.0;
+/// Narrowest a row gets (label plus key area); below this the rows scroll sideways.
+const MIN_ROW_WIDTH: f32 = 640.0;
 /// How close (points) a click must be to a key's diamond to pick it.
 const KEY_HIT: f32 = 6.0;
 
@@ -30,7 +32,24 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let duration = doc.motion.duration;
     let selected = state.key_sel.len();
 
-    ui.horizontal(|ui| {
+    controls(ui, state, duration, selected);
+
+    let lanes = lanes(state);
+    // Rows keep a usable width on a small window and scroll both ways, with
+    // thin scroll bars drawn over the rows so they take no room of their own.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
+    egui::ScrollArea::both().id_salt("timeline rows").auto_shrink([false, false]).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for (i, lane) in lanes.iter().enumerate() {
+            lane_row(ui, state, lane, i);
+        }
+    });
+}
+
+/// The bar above the rows: playback, keys, clipboard, ease, length and fps.
+/// It wraps onto a second line when the window is too narrow.
+fn controls(ui: &mut egui::Ui, state: &mut AppState, duration: f32, selected: usize) {
+    ui.horizontal_wrapped(|ui| {
         let play = if state.playing { "⏸ Pause" } else { "▶ Play" };
         if ui.button(play).on_hover_text("Space").clicked() {
             state.toggle_play();
@@ -96,14 +115,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
         fps_editor(ui, state);
         ui.checkbox(&mut state.looping, "Loop");
     });
-
-    let lanes = lanes(state);
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 1.0;
-        for (i, lane) in lanes.iter().enumerate() {
-            lane_row(ui, state, lane, i);
-        }
-    });
 }
 
 /// The rows to show: summary, position (if it has keys), then every part
@@ -168,7 +179,10 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
         })
         .collect();
     let height = if matches!(lane, Lane::All) { SUMMARY_HEIGHT } else { ROW_HEIGHT };
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click_and_drag());
+    // Never narrower than MIN_ROW_WIDTH, so keys don't crowd together on a small
+    // window; the rows scroll sideways instead.
+    let width = ui.available_width().max(MIN_ROW_WIDTH);
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let label_rect = Rect::from_min_size(rect.min, vec2(LABEL_WIDTH, height));
     let bar = Rect::from_min_max(pos2(rect.left() + LABEL_WIDTH, rect.top()), rect.max);

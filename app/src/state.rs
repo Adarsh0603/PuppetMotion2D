@@ -1,5 +1,6 @@
 use crate::canvas::{Drag, View};
 use crate::export::ExportUi;
+use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
     Clip, Ease, History, KeyRef, Template, Toward, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
@@ -230,6 +231,9 @@ pub struct AppState {
     pub template_name: String,
     /// Side-view templates are placed facing left (mirrored) instead of right.
     pub facing_left: bool,
+    /// Screen x of the canvas's left edge last frame (the side panel's right
+    /// edge), so the step buttons can start there.
+    pub canvas_left: f32,
     pub status: String,
     /// Set when a new image is loaded so the canvas fits it on the next frame.
     pub fit_pending: bool,
@@ -270,6 +274,7 @@ impl Default for AppState {
             template_choice: 0,
             template_name: String::new(),
             facing_left: false,
+            canvas_left: 0.0,
             status: "Open or drop a drawing to start.".into(),
             fit_pending: false,
             export: ExportUi::default(),
@@ -892,7 +897,9 @@ impl AppState {
             if ui.add_enabled(has_doc, egui::Button::new("Save As…")).on_hover_text("Ctrl+Shift+S").clicked() {
                 self.save_as();
             }
-            ui.separator();
+            // Start the steps where the canvas starts, past the side panel.
+            let gap = self.canvas_left + 8.0 - ui.cursor().left();
+            ui.add_space(gap.max(8.0));
             for (i, step) in Step::ALL.into_iter().enumerate() {
                 if i > 0 {
                     ui.label(egui::RichText::new("›").weak());
@@ -932,7 +939,14 @@ impl AppState {
         ui.heading(self.step.label());
         ui.label(egui::RichText::new(self.step.hint()).weak());
         ui.separator();
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.step {
+        // Shortcuts are pinned to the bottom, always open; the rest scrolls above them.
+        egui::Panel::bottom("shortcuts").resizable(false).show(ui, |ui| {
+            egui::ScrollArea::horizontal().id_salt("shortcuts scroll").show(ui, |ui| {
+                shortcuts(ui, step_shortcuts(self.step));
+            });
+        });
+        // Scrolls both ways, so a small window or narrow panel can still reach everything.
+        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| match self.step {
             Step::Review => self.review_section(ui),
             Step::Rig => self.rig_section(ui),
             Step::Animate => self.animate_section(ui),
@@ -940,34 +954,30 @@ impl AppState {
         });
     }
 
-    /// The shortcut list at the bottom of a step's panel: a little larger than
-    /// egui's small text so it's easy to read.
-    fn shortcut_help(ui: &mut egui::Ui, text: &str) {
-        ui.label(egui::RichText::new(text).size(11.5).weak());
-    }
-
     fn review_section(&mut self, ui: &mut egui::Ui) {
         let Some(doc) = &self.doc else {
-            ui.label("Open a drawing of one character on a plain background. A PNG with a transparent background works best.");
-            ui.add_space(6.0);
-            let open = egui::Button::new(egui::RichText::new("Open a drawing…").size(15.0).strong());
-            if ui.add(open.min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
-                self.request_open_dialog(ui.ctx());
-            }
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new("Or drop a file on the window. Saved projects (.pm2d) open the same way.").weak());
+            card(ui, "Open", |ui| {
+                ui.label("A drawing of one character on a plain background. A PNG with a transparent background works best.");
+                let open = egui::Button::new(egui::RichText::new("Open a drawing…").size(15.0).strong());
+                if ui.add(open.min_size(egui::vec2(ui.available_width(), 30.0))).clicked() {
+                    self.request_open_dialog(ui.ctx());
+                }
+                ui.label(egui::RichText::new("Or drop a file on the window. Saved projects (.pm2d) open the same way.").weak());
+            });
             return;
         };
-        ui.label(format!("{}  ·  {}×{} px", doc.name, doc.image.width(), doc.image.height()));
-        ui.add_space(4.0);
-        ui.label("Your character stays bright and the background is dimmed.");
-        ui.label(
-            egui::RichText::new("If some background is included, or part of the character is dimmed, fine-tune the cutout below.")
-                .weak(),
-        );
-        ui.add_space(4.0);
+        let (name, w, h) = (doc.name.clone(), doc.image.width(), doc.image.height());
+        card(ui, "Drawing", |ui| {
+            ui.label(egui::RichText::new(&name).strong());
+            ui.label(egui::RichText::new(format!("{w} × {h} px")).weak());
+            ui.label("Your character stays bright and the background is dimmed.");
+            ui.label(
+                egui::RichText::new("If some background is included, or part of the character is dimmed, fine-tune the cutout.")
+                    .weak(),
+            );
+        });
         let before = self.params;
-        egui::CollapsingHeader::new("Fine-tune cutout").default_open(false).show(ui, |ui| {
+        fold(ui, "Fine-tune cutout", |ui| {
             ui.add(egui::Slider::new(&mut self.params.threshold, 5.0..=150.0).text("background tolerance"))
                 .on_hover_text("How different from the background a colour must be to count as the character");
             ui.add(egui::Slider::new(&mut self.params.gap_close, 0..=20).text("close outline gaps (px)"))
@@ -993,22 +1003,26 @@ impl AppState {
         if self.doc.is_none() {
             return;
         }
-        ui.label("Drag the white dots to pose. Press K (or Keep pose) to save the pose at this frame, then move along the timeline and pose again.");
-        ui.add_space(4.0);
-        if ui.button("Reset pose").on_hover_text("Back to as drawn (removes the keys at this frame)").clicked() {
-            let before = self.snapshot();
-            let t = self.key_time();
-            if let Some(doc) = &mut self.doc {
-                doc.motion.remove_keys_at(t);
-                doc.reset_pose();
+        intro(ui, "Drag the white dots to pose. Press K to keep the pose at this frame, then move along the timeline and pose again.");
+        card(ui, "Pose", |ui| {
+            if ui.button("Reset pose").on_hover_text("Back to as drawn (removes the keys at this frame)").clicked() {
+                let before = self.snapshot();
+                let t = self.key_time();
+                if let Some(doc) = &mut self.doc {
+                    doc.motion.remove_keys_at(t);
+                    doc.reset_pose();
+                }
+                self.commit(before);
             }
-            self.commit(before);
-        }
-        ui.checkbox(&mut self.ik, "Move whole limbs (IK)")
-            .on_hover_text("Dragging a hand or foot bends the elbow or knee to follow");
-        ui.checkbox(&mut self.show_bones, "Show bones").on_hover_text("B: hide them to watch just the animation");
-        ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
-        egui::CollapsingHeader::new("Fine-tune joints").default_open(false).show(ui, |ui| {
+            ui.checkbox(&mut self.ik, "Move whole limbs (IK)")
+                .on_hover_text("Dragging a hand or foot bends the elbow or knee to follow");
+        });
+        card(ui, "View", |ui| {
+            ui.checkbox(&mut self.show_bones, "Show bones").on_hover_text("B: hide them to watch just the animation");
+            ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
+        });
+        self.layers_list(ui);
+        fold(ui, "Fine-tune joints", |ui| {
             let overlap = self.overlap;
             ui.add(egui::Slider::new(&mut self.overlap, 0.0..=2.0).text("joint fill"))
                 .on_hover_text("How big a round patch each part keeps at its joints, so turning a part leaves no gap");
@@ -1019,18 +1033,6 @@ impl AppState {
                 doc.dirty = true;
             }
         });
-        self.layers_list(ui);
-        ui.separator();
-        Self::shortcut_help(
-            ui,
-            "Drag a hand or foot: the whole limb follows (IK)\n\
-             Drag any other bone end: rotate that part (children follow)\n\
-             Drag the root's start dot: move the whole figure\n\
-             B: show/hide bones   Space: play/pause   K: key pose\n\
-             , and .: previous / next frame   Ctrl+A: select all keys\n\
-             Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
-             Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
-        );
     }
 
     /// "Layers": every part from front (top) to back, with buttons to move it
@@ -1041,7 +1043,7 @@ impl AppState {
         let front_to_back: Vec<usize> = skel.paint_order().into_iter().rev().collect();
         let mut change = None;
         let mut hovered = None;
-        egui::CollapsingHeader::new("Layers (what's in front)").default_open(false).show(ui, |ui| {
+        fold(ui, "Layers (what's in front)", |ui| {
             ui.label(
                 egui::RichText::new("The top of the list is in front. Parts attached to a part move with it.").weak(),
             );
@@ -1077,7 +1079,6 @@ impl AppState {
     fn template_controls(&mut self, ui: &mut egui::Ui) {
         self.template_choice = self.template_choice.min(self.templates.len().saturating_sub(1));
         ui.horizontal(|ui| {
-            ui.label("Template");
             let current = self.templates.get(self.template_choice).map_or("", |t| t.name.as_str()).to_string();
             egui::ComboBox::from_id_salt("template").selected_text(current).show_ui(ui, |ui| {
                 for (i, t) in self.templates.iter().enumerate() {
@@ -1094,32 +1095,30 @@ impl AppState {
         // Side views: which way the character faces, and which limbs are in front.
         let side_template = self.templates.get(self.template_choice).is_some_and(Template::is_side_view);
         let has_near_far = self.doc.as_ref().is_some_and(|d| d.skeleton.joints.iter().any(|j| j.name.starts_with("near ")));
-        if side_template || has_near_far {
+        if side_template {
             ui.horizontal(|ui| {
-                if side_template {
-                    ui.label("Facing");
-                    let before = self.facing_left;
-                    ui.selectable_value(&mut self.facing_left, false, "Right ▶");
-                    ui.selectable_value(&mut self.facing_left, true, "◀ Left");
-                    if before != self.facing_left {
-                        // Turning the template around re-places it.
-                        self.apply_template(self.template_choice);
-                    }
-                }
-                if has_near_far
-                    && ui
-                        .button("Swap near/far")
-                        .on_hover_text("Use if the bones called \"near\" landed on the limbs behind the body")
-                        .clicked()
-                {
-                    self.edit_skeleton(|s| {
-                        s.swap_near_far();
-                    });
-                    self.status = "Swapped near and far limbs".into();
+                ui.label("Facing");
+                let before = self.facing_left;
+                ui.selectable_value(&mut self.facing_left, false, "Right ▶");
+                ui.selectable_value(&mut self.facing_left, true, "◀ Left");
+                if before != self.facing_left {
+                    // Turning the template around re-places it.
+                    self.apply_template(self.template_choice);
                 }
             });
         }
-        egui::CollapsingHeader::new("Save as template").default_open(false).show(ui, |ui| {
+        if has_near_far
+            && ui
+                .button("Swap near/far")
+                .on_hover_text("Use if the bones called \"near\" landed on the limbs behind the body")
+                .clicked()
+        {
+            self.edit_skeleton(|s| {
+                s.swap_near_far();
+            });
+            self.status = "Swapped near and far limbs".into();
+        }
+        collapsing(ui, "Save as template", |ui| {
             ui.label(egui::RichText::new("Keep these bones to use on other drawings, e.g. for a monster or an animal.").weak());
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.template_name).hint_text("Name").desired_width(140.0));
@@ -1172,8 +1171,23 @@ impl AppState {
         if self.doc.is_none() {
             return;
         }
-        ui.label("Drag the dots onto the character's joints. Each coloured area moves with its bone.");
-        ui.add_space(4.0);
+        intro(ui, "Drag the dots onto the character's joints. Each coloured area moves with its bone.");
+        card(ui, "Template", |ui| self.template_controls(ui));
+        card(ui, "Bones", |ui| self.bone_tree(ui));
+        let sel = self.skel_sel;
+        if sel != SkelSel::None {
+            let doc = self.doc.as_ref().unwrap();
+            let title = match sel {
+                SkelSel::Joint(j) => format!("Selected joint: {}", doc.skeleton.joints[j].name),
+                SkelSel::Part(p) => format!("Selected bone: {}", doc.skeleton.parts[p].name),
+                SkelSel::None => unreachable!(),
+            };
+            card(ui, &title, |ui| self.selection_editor(ui, sel));
+        }
+    }
+
+    /// The bones as a tree, children under their parent. Click one to select it.
+    fn bone_tree(&mut self, ui: &mut egui::Ui) {
         let show_parts = self.show_parts;
         ui.checkbox(&mut self.show_parts, "Show part colours");
         if show_parts != self.show_parts
@@ -1181,13 +1195,12 @@ impl AppState {
         {
             doc.overlay_dirty = true;
         }
-        self.template_controls(ui);
-
-        let doc = self.doc.as_ref().unwrap();
+        let Some(doc) = &self.doc else { return };
         if doc.skeleton.parts.is_empty() {
-            ui.label("No bones. Shift+drag on the drawing to add one.");
+            ui.label(egui::RichText::new("No bones yet. Shift+drag on the drawing to add one.").weak());
         }
         let mut clicked = None;
+        ui.spacing_mut().item_spacing.y = 2.0;
         for (i, depth) in doc.skeleton.tree_order() {
             let text = egui::RichText::new(&doc.skeleton.parts[i].name).color(part_color(i));
             ui.horizontal(|ui| {
@@ -1200,12 +1213,13 @@ impl AppState {
         if let Some(i) = clicked {
             self.skel_sel = SkelSel::Part(i);
         }
+    }
 
-        // Rename / delete the selection.
-        let sel = self.skel_sel;
-        if sel != SkelSel::None {
-            ui.separator();
-            let label = if matches!(sel, SkelSel::Joint(_)) { "Joint name" } else { "Bone name" };
+    /// The selected joint or bone: name, and for a bone its parent, limit and
+    /// layer, laid out as a label/control grid; then Delete.
+    fn selection_editor(&mut self, ui: &mut egui::Ui, sel: SkelSel) {
+        egui::Grid::new("selection").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
+            ui.label("Name");
             let before = self.snapshot();
             let doc = self.doc.as_mut().unwrap();
             let name = match sel {
@@ -1213,11 +1227,7 @@ impl AppState {
                 SkelSel::Part(p) => &mut doc.skeleton.parts[p].name,
                 SkelSel::None => unreachable!(),
             };
-            let resp = ui.horizontal(|ui| {
-                ui.label(label);
-                ui.text_edit_singleline(name)
-            });
-            let resp = resp.inner;
+            let resp = ui.text_edit_singleline(name);
             // One undo step per rename: from gaining focus to losing it.
             if resp.gained_focus() {
                 self.field_before = before;
@@ -1226,11 +1236,16 @@ impl AppState {
                 let before = self.field_before.take();
                 self.commit(before);
             }
+            ui.end_row();
             if let SkelSel::Part(p) = sel {
+                ui.label("Attached to");
                 self.parent_picker(ui, p);
+                ui.end_row();
+                ui.label("Limit").on_hover_text("How far this bone can turn from the way it's drawn");
                 self.limit_editor(ui, p);
-                ui.horizontal(|ui| {
-                    ui.label("Layer").on_hover_text("What's drawn in front. Bones attached to this one move with it.");
+                ui.end_row();
+                ui.label("Layer").on_hover_text("What's drawn in front. Bones attached to this one move with it.");
+                ui.horizontal_wrapped(|ui| {
                     let buttons = [
                         ("To back", "Behind everything", Toward::BackMost),
                         ("Back", "One place back  [", Toward::Back),
@@ -1238,29 +1253,18 @@ impl AppState {
                         ("To front", "In front of everything", Toward::FrontMost),
                     ];
                     for (label, hint, to) in buttons {
-                        if ui.button(label).on_hover_text(hint).clicked() {
+                        if ui.small_button(label).on_hover_text(hint).clicked() {
                             self.change_layer(p, to);
                         }
                     }
                 });
+                ui.end_row();
             }
-            let delete = if matches!(sel, SkelSel::Joint(_)) { "Delete joint and its bones" } else { "Delete bone" };
-            if ui.button(delete).clicked() {
-                self.delete_skel_selection();
-            }
+        });
+        let delete = if matches!(sel, SkelSel::Joint(_)) { "Delete joint and its bones" } else { "Delete bone" };
+        if ui.button(delete).clicked() {
+            self.delete_skel_selection();
         }
-
-        ui.separator();
-        Self::shortcut_help(
-            ui,
-            "Drag a joint: move it\n\
-             Shift+drag from a joint: grow a new bone\n\
-             Shift+drag on empty space: start a new bone\n\
-             Click a joint or bone: select it   Delete: remove it\n\
-             [ and ]: send the selected bone back / bring it forward\n\
-             Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
-             Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
-        );
     }
 
     /// Rotation limit for bone `p`: on/off plus min/max in degrees. A whole
@@ -1274,7 +1278,7 @@ impl AppState {
         let mut started = false;
         let mut finished = false;
         ui.horizontal(|ui| {
-            let r = ui.checkbox(&mut on, "Limit rotation");
+            let r = ui.checkbox(&mut on, "");
             finished |= r.changed();
             started |= r.changed();
             if on {
@@ -1315,13 +1319,10 @@ impl AppState {
             .chain((0..skel.parts.len()).filter(|&q| q != p && !excluded.contains(&q)).map(Some))
             .collect();
         let mut chosen = current;
-        ui.horizontal(|ui| {
-            ui.label("Attached to");
-            egui::ComboBox::from_id_salt(("parent", p)).selected_text(name(current)).show_ui(ui, |ui| {
-                for &q in &options {
-                    ui.selectable_value(&mut chosen, q, name(q));
-                }
-            });
+        egui::ComboBox::from_id_salt(("parent", p)).selected_text(name(current)).show_ui(ui, |ui| {
+            for &q in &options {
+                ui.selectable_value(&mut chosen, q, name(q));
+            }
         });
         if chosen != current {
             self.edit_skeleton(|s| {
@@ -1330,6 +1331,52 @@ impl AppState {
         }
     }
 
+}
+
+/// The shortcuts listed at the bottom of each step's panel: (keys, what they do).
+fn step_shortcuts(step: Step) -> &'static [(&'static str, &'static str)] {
+    match step {
+        Step::Review => &[
+            ("Ctrl+O", "Open a drawing or project"),
+            ("Ctrl+S", "Save"),
+            ("Drag", "Pan the view"),
+            ("Scroll", "Zoom"),
+            ("F", "Fit to the window"),
+        ],
+        Step::Rig => &[
+            ("Drag joint", "Move it"),
+            ("Shift+drag", "Grow a new bone"),
+            ("Click", "Select a joint or bone"),
+            ("Delete", "Remove the selection"),
+            ("[  ]", "Send bone back / forward"),
+            ("Ctrl+Z", "Undo"),
+            ("Ctrl+Shift+Z", "Redo"),
+            ("Middle-drag", "Pan the view"),
+            ("Scroll", "Zoom"),
+            ("F", "Fit to the window"),
+        ],
+        Step::Animate => &[
+            ("Drag hand/foot", "Move the whole limb (IK)"),
+            ("Drag bone end", "Turn that part"),
+            ("Drag root dot", "Move the whole figure"),
+            ("K", "Keep the pose at this frame"),
+            ("Space", "Play / pause"),
+            (",  .", "Previous / next frame"),
+            ("B", "Show / hide bones"),
+            ("Ctrl+A", "Select all keys"),
+            ("Ctrl+C X V", "Copy / cut / paste keys"),
+            ("Delete", "Delete the selected keys"),
+            ("Ctrl+Z", "Undo"),
+            ("Middle-drag", "Pan the view"),
+            ("Scroll", "Zoom"),
+        ],
+        Step::Export => &[
+            ("Space", "Play / stop the preview"),
+            ("Drag", "Pan the view"),
+            ("Scroll", "Zoom"),
+            ("F", "Fit to the window"),
+        ],
+    }
 }
 
 pub fn to_color_image(img: &RgbaImage) -> ColorImage {

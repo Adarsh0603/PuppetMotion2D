@@ -4,6 +4,7 @@
 
 mod canvas;
 mod export;
+mod panel;
 mod paths;
 mod state;
 mod templates;
@@ -160,15 +161,18 @@ impl eframe::App for App {
 
         egui::Panel::top("steps").show(ui, |ui| {
             ui.add_space(4.0);
-            self.state.top_bar(ui);
+            // Scrolls sideways when the window is too narrow for every button.
+            egui::ScrollArea::horizontal().id_salt("top bar").show(ui, |ui| self.state.top_bar(ui));
             ui.add_space(2.0);
         });
         egui::Panel::bottom("status").show(ui, |ui| {
             self.state.status_bar(ui);
         });
-        egui::Panel::left("side").resizable(true).default_size(280.0).show(ui, |ui| {
+        let side = egui::Panel::left("side").resizable(true).default_size(360.0).show(ui, |ui| {
             self.state.side_panel(ui);
         });
+        // The top bar lines the steps up with the canvas's left edge (next frame).
+        self.state.canvas_left = side.response.rect.right();
         if self.state.step == state::Step::Animate && self.state.doc.is_some() {
             egui::Panel::bottom("timeline").resizable(true).default_size(160.0).min_size(70.0).max_size(600.0).show(ui, |ui| {
                 timeline::show(ui, &mut self.state);
