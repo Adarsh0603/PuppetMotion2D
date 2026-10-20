@@ -1,15 +1,13 @@
 //! The Export step: settings in the side panel, a preview of the framed area
-//! on the canvas, and rendering on a background thread with a progress bar.
+//! on the canvas, and rendering with a progress bar: on a background thread
+//! into files on desktop, a frame per screen refresh into a download in the
+//! browser.
 
 use crate::panel::card;
 use crate::state::AppState;
 use anim_core::{Pose, RectI};
-use anim_export::{Format, Job, Outcome, Settings, frame_area, frame_times, output_size};
+use anim_export::{Format, Job, Settings, frame_area, frame_times, output_size};
 use eframe::egui;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::thread::JoinHandle;
 
 #[derive(Default)]
 pub struct ExportUi {
@@ -17,13 +15,58 @@ pub struct ExportUi {
     running: Option<Running>,
 }
 
-/// An export in progress on its own thread.
+/// Desktop: an export in progress on its own thread, writing files.
+#[cfg(not(target_arch = "wasm32"))]
 struct Running {
-    done: Arc<AtomicUsize>,
+    done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     total: usize,
-    cancel: Arc<AtomicBool>,
-    handle: JoinHandle<std::io::Result<Outcome>>,
-    out: PathBuf,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<std::io::Result<anim_export::Outcome>>,
+    out: std::path::PathBuf,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Running {
+    fn done(&self) -> usize {
+        self.done.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    fn cancel(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn target(&self) -> String {
+        self.out.display().to_string()
+    }
+}
+
+/// Browser: an export in progress, one frame per screen refresh (there are
+/// no threads), downloaded as one file at the end.
+#[cfg(target_arch = "wasm32")]
+struct Running {
+    job: Job,
+    next: usize,
+    total: usize,
+    sink: Sink,
+    file_name: String,
+    cancelled: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+enum Sink {
+    Gif(anim_export::GifWriter<Vec<u8>>),
+    Frames(Box<anim_export::FramesZip>),
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Running {
+    fn done(&self) -> usize {
+        self.next
+    }
+    fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+    fn target(&self) -> String {
+        self.file_name.clone()
+    }
 }
 
 /// One pose per frame: the motion sampled at the frame rate, or just the
@@ -50,13 +93,13 @@ pub fn panel(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     }
     state.refresh_sprites(ui.ctx());
-    if let Some(r) = &state.export.running {
+    if let Some(r) = &mut state.export.running {
         card(ui, "Exporting", |ui| {
-            let done = r.done.load(Ordering::Relaxed);
-            ui.label(egui::RichText::new(r.out.display().to_string()).weak());
+            let done = r.done();
+            ui.label(egui::RichText::new(r.target()).weak());
             ui.add(egui::ProgressBar::new(done as f32 / r.total.max(1) as f32).text(format!("frame {done} of {}", r.total)));
             if ui.button("Cancel").clicked() {
-                r.cancel.store(true, Ordering::Relaxed);
+                r.cancel();
             }
         });
         return;
@@ -130,6 +173,7 @@ pub fn panel(ui: &mut egui::Ui, state: &mut AppState) {
 
 /// Open the file manager showing what was just exported: the GIF selected
 /// in its folder, or the frames folder itself.
+#[cfg(not(target_arch = "wasm32"))]
 fn reveal(path: &std::path::Path) {
     #[cfg(windows)]
     {
@@ -150,6 +194,7 @@ fn reveal(path: &std::path::Path) {
 }
 
 /// Pick up a finished export and keep the progress bar moving. Call once per frame.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn poll(ctx: &egui::Context, state: &mut AppState) {
     finish(ctx, state);
     if state.export.running.is_some() {
@@ -157,8 +202,80 @@ pub fn poll(ctx: &egui::Context, state: &mut AppState) {
     }
 }
 
-/// Ask where to save, then start rendering on a background thread.
+/// Render the next frame of a browser export, and download the file when
+/// it's done. Call once per frame.
+#[cfg(target_arch = "wasm32")]
+pub fn poll(ctx: &egui::Context, state: &mut AppState) {
+    let Some(r) = &mut state.export.running else { return };
+    if r.cancelled {
+        state.export.running = None;
+        state.status = "Export cancelled".into();
+        return;
+    }
+    if r.next < r.total {
+        let frame = r.job.render_frame(r.next);
+        let added = match &mut r.sink {
+            Sink::Gif(gif) => gif.add_frame(frame),
+            Sink::Frames(zip) => zip.add_frame(&frame),
+        };
+        r.next += 1;
+        if let Err(e) = added {
+            state.export.running = None;
+            state.status = format!("Export failed: {e}");
+            return;
+        }
+        ctx.request_repaint();
+        return;
+    }
+    let r = state.export.running.take().unwrap();
+    let (bytes, mime) = match r.sink {
+        Sink::Gif(gif) => (gif.finish(), "image/gif"),
+        Sink::Frames(zip) => ((*zip).finish(), "application/zip"),
+    };
+    state.status = match bytes {
+        Ok(bytes) => {
+            crate::platform::download(&r.file_name, &bytes, mime);
+            format!("Exported {} frames as {}", r.total, r.file_name)
+        }
+        Err(e) => format!("Export failed: {e}"),
+    };
+}
+
+/// Start rendering in the browser: frames are made one per screen refresh
+/// (see `poll`) and downloaded as a GIF or a zip of PNGs.
+#[cfg(target_arch = "wasm32")]
 fn begin(state: &mut AppState) {
+    let settings = state.export.settings;
+    let Some(doc) = &state.doc else { return };
+    let job = Job {
+        sprites: doc.sprites.clone(),
+        meshes: doc.meshes.clone(),
+        skeleton: doc.skeleton.clone(),
+        poses: frame_poses(state, settings.fps),
+        image_size: [doc.image.width(), doc.image.height()],
+        settings,
+    };
+    let (sink, file_name) = match settings.format {
+        Format::Gif => match anim_export::GifWriter::new(&job, Vec::new()) {
+            Ok(gif) => (Sink::Gif(gif), format!("{}.gif", doc.name)),
+            Err(e) => {
+                state.status = format!("Export failed: {e}");
+                return;
+            }
+        },
+        Format::Png => (Sink::Frames(Box::default()), format!("{}_frames.zip", doc.name)),
+    };
+    let total = job.poses.len();
+    state.pause();
+    state.status = format!("Exporting {total} frames…");
+    state.export.running = Some(Running { job, next: 0, total, sink, file_name, cancelled: false });
+}
+
+/// Ask where to save, then start rendering on a background thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn begin(state: &mut AppState) {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     let settings = state.export.settings;
     let Some(doc) = &state.doc else { return };
     let out = match settings.format {
@@ -205,7 +322,9 @@ fn begin(state: &mut AppState) {
 }
 
 /// Report a finished export in the status line and show it in the file manager.
+#[cfg(not(target_arch = "wasm32"))]
 fn finish(ctx: &egui::Context, state: &mut AppState) {
+    use anim_export::Outcome;
     if !state.export.running.as_ref().is_some_and(|r| r.handle.is_finished()) {
         return;
     }

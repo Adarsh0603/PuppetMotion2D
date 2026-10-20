@@ -7,7 +7,7 @@
 
 use anim_core::{PartMesh, Pose, RectI, Skeleton, Sprite, world_transforms};
 use image::RgbaImage;
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 /// Space left around the moving figure when cropping (drawing pixels).
@@ -226,35 +226,96 @@ impl Job {
     }
 
     fn write_gif(&self, path: &Path, progress: &mut impl FnMut(usize) -> bool) -> io::Result<Outcome> {
-        let [w, h] = self.output_size();
-        let too_big = || io::Error::other(format!("{w}×{h} is too big for a GIF (65535 px per side at most)"));
-        let (w16, h16) = (u16::try_from(w).map_err(|_| too_big())?, u16::try_from(h).map_err(|_| too_big())?);
-        let file = BufWriter::new(std::fs::File::create(path)?);
-        let mut encoder = gif::Encoder::new(file, w16, h16, &[]).map_err(io::Error::other)?;
-        encoder.set_repeat(gif::Repeat::Infinite).map_err(io::Error::other)?;
-        let transparent = self.settings.background.is_none();
-        let fps = self.settings.fps.max(1) as f32;
-        // GIF delays are whole hundredths of a second; round the running
-        // total so the overall speed stays right (e.g. 24 fps → 4, 4, 4, 5, …).
-        let centis = |i: usize| (i as f32 * 100.0 / fps).round() as u16;
+        let mut gif = GifWriter::new(self, BufWriter::new(std::fs::File::create(path)?))?;
         for i in 0..self.poses.len() {
-            let mut pixels = self.render_frame(i).into_raw();
-            if transparent {
-                // GIF pixels are either fully see-through or fully solid.
-                for a in pixels.iter_mut().skip(3).step_by(4) {
-                    *a = if *a < 128 { 0 } else { 255 };
-                }
-            }
-            let mut frame = gif::Frame::from_rgba_speed(w16, h16, &mut pixels, GIF_SPEED);
-            frame.delay = centis(i + 1) - centis(i);
-            // Clear each frame before the next, or moved parts leave trails on a transparent background.
-            frame.dispose = gif::DisposalMethod::Background;
-            encoder.write_frame(&frame).map_err(io::Error::other)?;
+            gif.add_frame(self.render_frame(i))?;
             if !progress(i + 1) {
                 return Ok(Outcome::Cancelled);
             }
         }
+        gif.finish()?;
         Ok(Outcome::Done(self.poses.len()))
+    }
+}
+
+/// Writes a job's frames into a looping GIF one at a time, so the caller
+/// decides the pace (a background thread on desktop, a frame per screen
+/// refresh in the browser).
+pub struct GifWriter<W: Write> {
+    encoder: gif::Encoder<W>,
+    size: (u16, u16),
+    transparent: bool,
+    fps: f32,
+    /// Frames written so far.
+    count: usize,
+}
+
+impl<W: Write> GifWriter<W> {
+    pub fn new(job: &Job, out: W) -> io::Result<Self> {
+        let [w, h] = job.output_size();
+        let too_big = || io::Error::other(format!("{w}×{h} is too big for a GIF (65535 px per side at most)"));
+        let size = (u16::try_from(w).map_err(|_| too_big())?, u16::try_from(h).map_err(|_| too_big())?);
+        let mut encoder = gif::Encoder::new(out, size.0, size.1, &[]).map_err(io::Error::other)?;
+        encoder.set_repeat(gif::Repeat::Infinite).map_err(io::Error::other)?;
+        let transparent = job.settings.background.is_none();
+        Ok(GifWriter { encoder, size, transparent, fps: job.settings.fps.max(1) as f32, count: 0 })
+    }
+
+    /// Add the next frame (as rendered by `Job::render_frame`).
+    pub fn add_frame(&mut self, image: RgbaImage) -> io::Result<()> {
+        let mut pixels = image.into_raw();
+        if self.transparent {
+            // GIF pixels are either fully see-through or fully solid.
+            for a in pixels.iter_mut().skip(3).step_by(4) {
+                *a = if *a < 128 { 0 } else { 255 };
+            }
+        }
+        // GIF delays are whole hundredths of a second; round the running
+        // total so the overall speed stays right (e.g. 24 fps → 4, 4, 4, 5, …).
+        let centis = |i: usize| (i as f32 * 100.0 / self.fps).round() as u16;
+        let mut frame = gif::Frame::from_rgba_speed(self.size.0, self.size.1, &mut pixels, GIF_SPEED);
+        frame.delay = centis(self.count + 1) - centis(self.count);
+        // Clear each frame before the next, or moved parts leave trails on a transparent background.
+        frame.dispose = gif::DisposalMethod::Background;
+        self.encoder.write_frame(&frame).map_err(io::Error::other)?;
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Finish the file and hand back what it was written to.
+    pub fn finish(self) -> io::Result<W> {
+        self.encoder.into_inner().map_err(io::Error::other)
+    }
+}
+
+/// Collects frames as `frame_0001.png`, `frame_0002.png`, … in a zip, in
+/// memory (for the browser, where frames are downloaded as one file).
+pub struct FramesZip {
+    zip: zip::ZipWriter<io::Cursor<Vec<u8>>>,
+    count: usize,
+}
+
+impl Default for FramesZip {
+    fn default() -> Self {
+        FramesZip { zip: zip::ZipWriter::new(io::Cursor::new(Vec::new())), count: 0 }
+    }
+}
+
+impl FramesZip {
+    pub fn add_frame(&mut self, image: &RgbaImage) -> io::Result<()> {
+        let mut png = io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).map_err(io::Error::other)?;
+        self.count += 1;
+        // PNGs are already compressed; store them as they are.
+        let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        self.zip.start_file(format!("frame_{:04}.png", self.count), stored).map_err(io::Error::other)?;
+        self.zip.write_all(png.get_ref())?;
+        Ok(())
+    }
+
+    /// The finished zip file's bytes.
+    pub fn finish(self) -> io::Result<Vec<u8>> {
+        Ok(self.zip.finish().map_err(io::Error::other)?.into_inner())
     }
 }
 
@@ -356,6 +417,32 @@ mod tests {
         let sprites = vec![Sprite { part: 0, image, origin: [2, 4], pivot: [2.0, 5.0] }];
         let meshes = anim_core::build_meshes(&sprites, 2.0);
         Job { sprites, meshes, skeleton, poses, image_size: [10, 10], settings }
+    }
+
+    #[test]
+    fn gif_and_frames_can_be_made_in_memory() {
+        let poses: Vec<Pose> = (0..3).map(|i| {
+            let mut p = Pose::rest(1);
+            p.set_angle(0, i as f32 * 0.4);
+            p
+        }).collect();
+        let j = job(poses, Settings { format: Format::Gif, ..uncropped(None) });
+        let mut gif = GifWriter::new(&j, Vec::new()).unwrap();
+        for i in 0..3 {
+            gif.add_frame(j.render_frame(i)).unwrap();
+        }
+        let bytes = gif.finish().unwrap();
+        let frames = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).unwrap().into_frames().collect_frames().unwrap();
+        assert_eq!(frames.len(), 3);
+
+        let mut zip = FramesZip::default();
+        for i in 0..3 {
+            zip.add_frame(&j.render_frame(i)).unwrap();
+        }
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(zip.finish().unwrap())).unwrap();
+        let names: Vec<String> = archive.file_names().filter_map(Result::ok).map(|n| n.into_owned()).collect();
+        assert_eq!(names.len(), 3);
+        assert!(names.iter().any(|n| n == "frame_0001.png") && names.iter().any(|n| n == "frame_0003.png"));
     }
 
     #[test]

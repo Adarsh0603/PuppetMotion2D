@@ -73,6 +73,15 @@ pub fn fill_behind(img: &RgbaImage, masks: &[Mask], order: &[usize]) -> Vec<Opti
         r
     };
     let mut out = vec![None; masks.len()];
+    // In the browser there are no threads: fill the parts one after another.
+    if cfg!(target_arch = "wasm32") {
+        for (p, b) in boxes.iter().enumerate() {
+            if let Some(b) = *b {
+                out[p] = part_fill(img, &labels, w, h, &rank, p, b);
+            }
+        }
+        return out;
+    }
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..masks.len())
             .filter_map(|p| {

@@ -1,3 +1,4 @@
 target/
 /testdata/out/
 /dist/
+/app/dist/

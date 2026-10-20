@@ -10,6 +10,14 @@ pub fn for_rows<T: Send>(out: &mut [T], w: usize, rows: Range<usize>, f: impl Fn
     if n == 0 || w == 0 {
         return;
     }
+    // In the browser there are no threads: do the rows one after another.
+    if cfg!(target_arch = "wasm32") {
+        let slice = &mut out[rows.start * w..rows.end * w];
+        for (i, row) in slice.chunks_mut(w).enumerate() {
+            f(rows.start + i, row);
+        }
+        return;
+    }
     let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).min(n);
     let per = n.div_ceil(threads);
     let slice = &mut out[rows.start * w..rows.end * w];

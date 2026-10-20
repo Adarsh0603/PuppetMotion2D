@@ -6,6 +6,11 @@ use std::path::PathBuf;
 /// `$XDG_DATA_HOME/PuppetMotion2D` or `~/.local/share/PuppetMotion2D` elsewhere.
 /// Tests get a temporary folder, so they never touch real files.
 pub fn app_data_dir() -> PathBuf {
+    // The browser has no files (asking for a temp folder would even crash);
+    // it keeps things in its own storage instead (see `platform`).
+    if cfg!(target_arch = "wasm32") {
+        return PathBuf::new();
+    }
     if cfg!(test) {
         return std::env::temp_dir().join(format!("pm2d_test_appdata_{}", std::process::id()));
     }

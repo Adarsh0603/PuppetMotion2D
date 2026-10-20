@@ -23,7 +23,7 @@ pub use history::History;
 pub use mask::Mask;
 pub use mesh::{PartMesh, build_meshes, cell_size, smooth_weights};
 pub use motion::{Clip, Ease, Key, KeyRef, Motion, TrackId};
-pub use project::{LoadedProject, ProjectData, load_project, save_project};
+pub use project::{LoadedProject, ProjectData, load_project, project_from_bytes, project_to_bytes, save_project};
 pub use rig::{
     Affine2, Pose, aim_part, angle_to_point, clamp_to_limit, ik_parent, posed_joint, solve_two_bone, world_transforms,
 };

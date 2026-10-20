@@ -44,14 +44,10 @@ pub struct ProjectData {
     /// Hand-painted bone weights (none in older projects).
     #[serde(default)]
     pub weight_paint: crate::weight_paint::WeightPaint,
-    /// Guess what's hidden behind parts, shown when they move away. On for
-    /// older projects too: it changes nothing at rest, only fills holes.
-    #[serde(default = "yes")]
+    /// Guess what's hidden behind parts, shown when they move away. Off unless
+    /// switched on (also for older projects): its guesses aren't reliable yet.
+    #[serde(default)]
     pub fill_behind: bool,
-}
-
-fn yes() -> bool {
-    true
 }
 
 fn default_overlap() -> f32 {
@@ -68,27 +64,46 @@ pub struct LoadedProject {
 /// Write a project. Goes to a temporary file first and is then renamed into
 /// place, so a crash mid-save never leaves a half-written project behind.
 pub fn save_project(path: &Path, data: &ProjectData, image_bytes: &[u8], image_ext: &str) -> io::Result<()> {
-    use zip::write::SimpleFileOptions;
     let tmp = path.with_extension(format!("{EXTENSION}.tmp"));
-    {
-        let mut zip = zip::ZipWriter::new(std::fs::File::create(&tmp)?);
-        let deflate = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        zip.start_file(JSON_NAME, deflate).map_err(io::Error::other)?;
-        let json = serde_json::to_vec_pretty(data).map_err(io::Error::other)?;
-        zip.write_all(&json)?;
-        // Images are already compressed; store them as-is.
-        let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        zip.start_file(format!("{IMAGE_STEM}{image_ext}"), stored).map_err(io::Error::other)?;
-        zip.write_all(image_bytes)?;
-        zip.finish().map_err(io::Error::other)?;
-    }
+    write_project(std::fs::File::create(&tmp)?, data, image_bytes, image_ext)?;
     std::fs::rename(&tmp, path)
 }
 
+/// A project as the bytes of a `.pm2d` file (for the browser, where it's
+/// downloaded instead of written to a path).
+pub fn project_to_bytes(data: &ProjectData, image_bytes: &[u8], image_ext: &str) -> io::Result<Vec<u8>> {
+    let mut out = io::Cursor::new(Vec::new());
+    write_project(&mut out, data, image_bytes, image_ext)?;
+    Ok(out.into_inner())
+}
+
+fn write_project<W: Write + io::Seek>(to: W, data: &ProjectData, image_bytes: &[u8], image_ext: &str) -> io::Result<()> {
+    use zip::write::SimpleFileOptions;
+    let mut zip = zip::ZipWriter::new(to);
+    let deflate = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file(JSON_NAME, deflate).map_err(io::Error::other)?;
+    let json = serde_json::to_vec_pretty(data).map_err(io::Error::other)?;
+    zip.write_all(&json)?;
+    // Images are already compressed; store them as-is.
+    let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file(format!("{IMAGE_STEM}{image_ext}"), stored).map_err(io::Error::other)?;
+    zip.write_all(image_bytes)?;
+    zip.finish().map_err(io::Error::other)?;
+    Ok(())
+}
+
 pub fn load_project(path: &Path) -> io::Result<LoadedProject> {
+    read_project(std::fs::File::open(path)?)
+}
+
+/// Read a project from the bytes of a `.pm2d` file.
+pub fn project_from_bytes(bytes: &[u8]) -> io::Result<LoadedProject> {
+    read_project(io::Cursor::new(bytes))
+}
+
+fn read_project<R: Read + io::Seek>(from: R) -> io::Result<LoadedProject> {
     let bad = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
-    let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)
-        .map_err(|e| bad(format!("not a project file ({e})")))?;
+    let mut zip = zip::ZipArchive::new(from).map_err(|e| bad(format!("not a project file ({e})")))?;
 
     let mut json = Vec::new();
     zip.by_name(JSON_NAME).map_err(|_| bad("project.json is missing".into()))?.read_to_end(&mut json)?;
@@ -160,6 +175,16 @@ mod tests {
         assert_eq!(loaded.image_bytes, image);
         assert_eq!(loaded.image_ext, "jpg");
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn round_trip_in_memory() {
+        let data = sample();
+        let bytes = project_to_bytes(&data, &[9, 8, 7], "png").unwrap();
+        let loaded = project_from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.data, data);
+        assert_eq!(loaded.image_bytes, vec![9, 8, 7]);
+        assert_eq!(loaded.image_ext, "png");
     }
 
     #[test]

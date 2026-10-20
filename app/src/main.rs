@@ -6,6 +6,7 @@ mod canvas;
 mod export;
 mod panel;
 mod paths;
+mod platform;
 mod state;
 mod templates;
 mod timeline;
@@ -13,10 +14,11 @@ mod unsaved;
 
 use eframe::egui;
 use state::AppState;
-use std::path::PathBuf;
 
+/// Desktop: open the window (with a drawing or project given on the command line).
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
-    let initial = std::env::args_os().nth(1).map(PathBuf::from);
+    let initial = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("built-in icon");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -24,8 +26,8 @@ fn main() -> eframe::Result {
             .with_icon(icon)
             .with_inner_size([1280.0, 800.0])
             .with_drag_and_drop(true),
-        // The OpenGL renderer builds mipmaps for our textures (the wgpu one
-        // ignores them), so a big drawing shrunk to fit stays smooth.
+        // The OpenGL renderer builds mipmaps for our textures, so a big
+        // drawing shrunk to fit stays smooth.
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -33,7 +35,7 @@ fn main() -> eframe::Result {
         "PuppetMotion 2D",
         options,
         Box::new(move |cc| {
-            let mut app = App { state: AppState::default(), title: String::new() };
+            let mut app = App::new();
             // Offer back anything a crash left unsaved.
             app.state.unsaved.find_recovery();
             if let Some(path) = initial {
@@ -44,6 +46,29 @@ fn main() -> eframe::Result {
     )
 }
 
+/// Browser: start the app on the page's canvas (see `index.html`).
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use wasm_bindgen::JsCast;
+    wasm_bindgen_futures::spawn_local(async {
+        let document = web_sys::window().and_then(|w| w.document()).expect("running in a web page");
+        let canvas = document
+            .get_element_by_id("puppetmotion")
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .expect("the page has a <canvas id=\"puppetmotion\">");
+        let started = eframe::WebRunner::new()
+            .start(canvas, eframe::WebOptions::default(), Box::new(|_cc| Ok(Box::new(App::new()))))
+            .await;
+        // Swap the "Loading…" text for the app, or say what went wrong.
+        if let Some(loading) = document.get_element_by_id("loading") {
+            match started {
+                Ok(()) => loading.remove(),
+                Err(_) => loading.set_text_content(Some("Sorry, PuppetMotion couldn't start in this browser.")),
+            }
+        }
+    });
+}
+
 struct App {
     state: AppState,
     /// Window title last sent, so it's only updated when it changes.
@@ -51,6 +76,10 @@ struct App {
 }
 
 impl App {
+    fn new() -> Self {
+        App { state: AppState::default(), title: String::new() }
+    }
+
     /// Global keys: undo/redo, save, open. Skipped while a text box has focus
     /// (it has its own undo) and mid-drag (the drag's undo step isn't recorded yet).
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -151,9 +180,16 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let dropped = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()));
-        if let Some(path) = dropped {
-            self.state.request_open(&ctx, &path);
+        // A dropped file: on desktop it's read from its path; in the browser
+        // it's read asynchronously and arrives with the picked files below.
+        if let Some(file) = ctx.input(|i| i.raw.dropped_files.first().cloned()) {
+            #[cfg(not(target_arch = "wasm32"))]
+            self.state.request_open(&ctx, file.path());
+            #[cfg(target_arch = "wasm32")]
+            platform::read_dropped(&ctx, file);
+        }
+        for picked in platform::take_picked() {
+            self.state.request_open_bytes(&ctx, picked.name, picked.bytes);
         }
         self.shortcuts(&ctx);
         self.state.tick(&ctx);

@@ -11,7 +11,8 @@ use crate::state::AppState;
 use anim_core::{ProjectData, load_project, save_project};
 use eframe::egui;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
+use web_time::Instant;
 
 /// How often unsaved changes are copied to the recovery file.
 const AUTOSAVE_EVERY: Duration = Duration::from_secs(60);
@@ -24,7 +25,10 @@ const RECOVERY_INFO: &str = "autosave.txt";
 pub enum Pending {
     Close,
     OpenDialog,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // desktop only: browsers have no paths
     Open(PathBuf),
+    /// A file given by contents (dropped in the browser, or picked there).
+    OpenBytes(String, Vec<u8>),
 }
 
 /// A recovery copy found at startup.
@@ -67,6 +71,7 @@ impl Unsaved {
     }
 
     /// Look for a recovery copy left behind by a crash.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // no recovery files in the browser
     pub fn find_recovery(&mut self) {
         let file = self.file();
         let Ok(saved_at) = std::fs::metadata(&file).and_then(|m| m.modified()) else { return };
@@ -92,8 +97,12 @@ pub fn autosave(state: &mut AppState) {
 }
 
 /// Write the recovery copy if there are unsaved changes it doesn't have yet.
+/// Not in the browser, which has no files to keep it in.
 pub fn autosave_now(state: &mut AppState) {
     state.unsaved.last_check = Instant::now();
+    if crate::platform::IS_WEB {
+        return;
+    }
     let Some(doc) = &state.doc else { return };
     if !doc.dirty {
         return;
@@ -137,7 +146,7 @@ pub fn show_prompt(ctx: &egui::Context, state: &mut AppState) {
     let name = state.doc.as_ref().map_or_else(String::new, |d| d.name.clone());
     let action = match pending {
         Pending::Close => "before closing",
-        Pending::OpenDialog | Pending::Open(_) => "before opening another file",
+        Pending::OpenDialog | Pending::Open(_) | Pending::OpenBytes(..) => "before opening another file",
     };
     let mut choice = None;
     let modal = egui::Modal::new(egui::Id::unique("save prompt")).show(ctx, |ui| {
@@ -195,6 +204,7 @@ fn proceed(ctx: &egui::Context, state: &mut AppState, pending: Pending) {
         }
         Pending::OpenDialog => state.open_dialog(ctx),
         Pending::Open(path) => state.open(ctx, &path),
+        Pending::OpenBytes(name, bytes) => state.open_bytes(ctx, &name, bytes, None),
     }
 }
 

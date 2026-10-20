@@ -4,7 +4,7 @@ use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
     Clip, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
-    NO_PART, distance_transform, foreground_mask, load_project, project, save_project, masks_from_labels, part_labels,
+    NO_PART, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
@@ -311,6 +311,8 @@ pub struct AppState {
     pub fit_pending: bool,
     /// Export settings and any export in progress.
     pub export: ExportUi,
+    /// The app icon, shown next to the name in the browser's top bar (loaded when first needed).
+    pub app_icon: Option<TextureHandle>,
     /// The "Save changes?" prompt, autosave, and crash recovery.
     pub unsaved: Unsaved,
 }
@@ -340,7 +342,8 @@ impl Default for AppState {
             show_parts: true,
             overlap: 1.0,
             softness: DEFAULT_SOFTNESS,
-            fill_behind: true,
+            // Off by default until its guesses are more reliable.
+            fill_behind: false,
             show_ghost: false,
             show_bones: true,
             show_mesh: false,
@@ -357,33 +360,36 @@ impl Default for AppState {
             status: "Open or drop a drawing to start.".into(),
             fit_pending: false,
             export: ExportUi::default(),
+            app_icon: None,
             unsaved: Unsaved::new(crate::unsaved::recovery_dir()),
         }
     }
 }
 
 impl AppState {
-    /// Open an image or a `.pm2d` project, chosen by the file extension.
+    /// Open an image or a `.pm2d` project file from disk.
     pub fn open(&mut self, ctx: &egui::Context, path: &Path) {
-        let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
-        if ext == project::EXTENSION {
-            self.open_project(ctx, path);
-        } else {
-            self.open_image(ctx, path);
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        match std::fs::read(path) {
+            Ok(bytes) => self.open_bytes(ctx, &name, bytes, Some(path)),
+            Err(e) => self.status = format!("Could not open {}: {e}", path.display()),
         }
     }
 
-    fn open_image(&mut self, ctx: &egui::Context, path: &Path) {
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.status = format!("Could not open {}: {e}", path.display());
-                return;
-            }
-        };
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
-        let Some(mut doc) = self.load_doc(ctx, &name, bytes, ext) else { return };
+    /// Open an image or a `.pm2d` project from its contents, chosen by the
+    /// file name's extension. `path` is where it came from on disk, if
+    /// anywhere (a project then saves back there; in the browser there's none).
+    pub fn open_bytes(&mut self, ctx: &egui::Context, name: &str, bytes: Vec<u8>, path: Option<&Path>) {
+        let ext = Path::new(name).extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+        if ext == project::EXTENSION {
+            self.open_project(ctx, name, &bytes, path);
+        } else {
+            self.open_image(ctx, name, bytes, ext);
+        }
+    }
+
+    fn open_image(&mut self, ctx: &egui::Context, name: &str, bytes: Vec<u8>, ext: String) {
+        let Some(mut doc) = self.load_doc(ctx, name, bytes, ext) else { return };
         // A new drawing bends smoothly by default (an opened project keeps its own setting).
         self.softness = DEFAULT_SOFTNESS;
         // Start with the template last used (Person (front) at first), facing the same way.
@@ -395,11 +401,11 @@ impl AppState {
         self.set_step(Step::Review);
     }
 
-    fn open_project(&mut self, ctx: &egui::Context, path: &Path) {
-        let loaded = match load_project(path) {
+    fn open_project(&mut self, ctx: &egui::Context, name: &str, bytes: &[u8], path: Option<&Path>) {
+        let loaded = match project_from_bytes(bytes) {
             Ok(l) => l,
             Err(e) => {
-                self.status = format!("Could not open {}: {e}", path.display());
+                self.status = format!("Could not open {name}: {e}");
                 return;
             }
         };
@@ -412,8 +418,8 @@ impl AppState {
         let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext) else { return };
         doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion, paint: data.weight_paint });
         doc.recompute_skeleton();
-        doc.project_path = Some(path.to_path_buf());
-        self.status = format!("Opened project {}", path.file_name().unwrap_or_default().to_string_lossy());
+        doc.project_path = path.map(Path::to_path_buf);
+        self.status = format!("Opened project {name}");
         // A project picks up where it was left: animating if it has keys, else rigging.
         let step = if doc.motion.is_empty() { Step::Rig } else { Step::Animate };
         self.set_doc(doc);
@@ -738,6 +744,7 @@ impl AppState {
     }
 
     /// Save to the current project file, or ask where if it has none yet.
+    /// In the browser, the project is downloaded.
     pub fn save(&mut self) {
         match self.doc.as_ref().and_then(|d| d.project_path.clone()) {
             Some(path) => self.save_to(&path),
@@ -745,6 +752,23 @@ impl AppState {
         }
     }
 
+    /// Browser: there's nowhere to save to, so the project file is downloaded.
+    #[cfg(target_arch = "wasm32")]
+    pub fn save_as(&mut self) {
+        let Some(data) = self.project_data() else { return };
+        let Some(doc) = &mut self.doc else { return };
+        let file = format!("{}.{}", doc.name, project::EXTENSION);
+        self.status = match anim_core::project_to_bytes(&data, &doc.image_bytes, &doc.image_ext) {
+            Ok(bytes) => {
+                crate::platform::download(&file, &bytes, "application/zip");
+                doc.dirty = false;
+                format!("Downloaded {file}")
+            }
+            Err(e) => format!("Save failed: {e}"),
+        };
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn save_as(&mut self) {
         let Some(doc) = &self.doc else { return };
         let Some(mut path) = rfd::FileDialog::new()
@@ -794,11 +818,22 @@ impl AppState {
     }
 
     /// Open `path`, first asking to save if the current drawing has unsaved changes.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // desktop only: browsers have no paths
     pub fn request_open(&mut self, ctx: &egui::Context, path: &Path) {
         if self.doc.as_ref().is_some_and(|d| d.dirty) {
             self.unsaved.prompt = Some(Pending::Open(path.to_path_buf()));
         } else {
             self.open(ctx, path);
+        }
+    }
+
+    /// Open a file from its contents (a drop or a browser pick), first asking
+    /// to save if the current drawing has unsaved changes.
+    pub fn request_open_bytes(&mut self, ctx: &egui::Context, name: String, bytes: Vec<u8>) {
+        if self.doc.as_ref().is_some_and(|d| d.dirty) {
+            self.unsaved.prompt = Some(Pending::OpenBytes(name, bytes));
+        } else {
+            self.open_bytes(ctx, &name, bytes, None);
         }
     }
 
@@ -811,8 +846,16 @@ impl AppState {
         }
     }
 
+    /// Browser: the browser's file picker answers later; the file arrives
+    /// through `platform::take_picked` (handled in `main.rs`).
+    #[cfg(target_arch = "wasm32")]
     pub fn open_dialog(&mut self, ctx: &egui::Context) {
-        let images = ["png", "jpg", "jpeg", "webp", "bmp", "gif"];
+        crate::platform::pick_file(ctx);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_dialog(&mut self, ctx: &egui::Context) {
+        let images = crate::platform::IMAGE_TYPES;
         let all: Vec<&str> = images.iter().copied().chain([project::EXTENSION]).collect();
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Images and projects", &all)
@@ -1021,14 +1064,35 @@ impl AppState {
     pub fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let has_doc = self.doc.is_some();
+            // The browser has no window title, so the app names itself here.
+            if crate::platform::IS_WEB {
+                let icon = self.app_icon.get_or_insert_with(|| {
+                    let png = image::load_from_memory(include_bytes!("../assets/icon.png")).expect("built-in icon");
+                    ui.ctx().load_texture("app icon", to_color_image(&png.to_rgba8()), SMOOTH)
+                });
+                ui.image((icon.id(), egui::vec2(20.0, 20.0)));
+                ui.label(egui::RichText::new("PuppetMotion 2D").size(16.0).strong());
+                ui.separator();
+            }
             if ui.button("Open…").on_hover_text("A drawing or a project (Ctrl+O)").clicked() {
                 self.request_open_dialog(ui.ctx());
             }
-            if ui.add_enabled(has_doc, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked() {
-                self.save();
-            }
-            if ui.add_enabled(has_doc, egui::Button::new("Save As…")).on_hover_text("Ctrl+Shift+S").clicked() {
-                self.save_as();
+            if crate::platform::IS_WEB {
+                // The browser can't save to a file, only download one.
+                if ui
+                    .add_enabled(has_doc, egui::Button::new("Download project"))
+                    .on_hover_text("Saves a .pm2d project file you can open again later (Ctrl+S)")
+                    .clicked()
+                {
+                    self.save();
+                }
+            } else {
+                if ui.add_enabled(has_doc, egui::Button::new("Save")).on_hover_text("Ctrl+S").clicked() {
+                    self.save();
+                }
+                if ui.add_enabled(has_doc, egui::Button::new("Save As…")).on_hover_text("Ctrl+Shift+S").clicked() {
+                    self.save_as();
+                }
             }
             // Start the steps where the canvas starts, past the side panel.
             let gap = self.canvas_left + 8.0 - ui.cursor().left();
