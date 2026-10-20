@@ -98,6 +98,82 @@ fn part_mesh(s: &Sprite, cell: f32) -> PartMesh {
     mesh
 }
 
+/// Joints never get a thinner band than this (px) to bend over.
+const MIN_JOINT_THICKNESS: f32 = 3.0;
+
+/// Smooth bending at the joints. Mesh points near a joint where a bone hangs
+/// from its parent follow a blend of both bones, fading from the parent to
+/// the child across a band whose half-width is `softness` × the drawing's
+/// half-thickness at that joint (`dt` is the edge-distance map of the
+/// character, `w` pixels wide). 0 keeps every point on its own bone (rigid).
+///
+/// A point's weights depend only on where it is, not on which part's mesh it
+/// belongs to, so where two parts meet (their grid points coincide) both
+/// sides move together and the seam stays closed.
+pub fn smooth_weights(meshes: &mut [PartMesh], skel: &crate::skeleton::Skeleton, dt: &[f32], w: usize, softness: f32) {
+    // Every parent → child joint: where it is, how thick the drawing is there,
+    // and which way the child points.
+    struct Joint {
+        at: [f32; 2],
+        thickness: f32,
+        dir: [f32; 2],
+        parent: usize,
+        child: usize,
+    }
+    let thickness_at = |p: [f32; 2]| {
+        let h = dt.len() / w.max(1);
+        let (x, y) = (p[0].max(0.0) as usize, p[1].max(0.0) as usize);
+        if x < w && y < h { dt[y * w + x] } else { 0.0 }
+    };
+    let joints: Vec<Joint> = skel
+        .parts
+        .iter()
+        .enumerate()
+        .filter_map(|(child, part)| {
+            let parent = part.parent?;
+            let (a, b) = skel.bone(child);
+            let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt().max(1e-3);
+            Some(Joint {
+                at: a,
+                thickness: thickness_at(a).max(MIN_JOINT_THICKNESS),
+                dir: [(b[0] - a[0]) / len, (b[1] - a[1]) / len],
+                parent,
+                child,
+            })
+        })
+        .collect();
+    for mesh in meshes.iter_mut() {
+        for (p, weights) in mesh.points.iter().zip(mesh.weights.iter_mut()) {
+            *weights = vec![(mesh.part, 1.0)];
+            if softness <= 0.0 {
+                continue;
+            }
+            // The nearest joint this part is on either side of, if the point is
+            // close to it. Several children can share one joint (both thighs at
+            // the hip); then the child bone nearest the point wins, so the
+            // point agrees with that child's own mesh along their seam.
+            let near = joints
+                .iter()
+                .filter(|j| j.parent == mesh.part || j.child == mesh.part)
+                .map(|j| {
+                    let d = ((p[0] - j.at[0]).powi(2) + (p[1] - j.at[1]).powi(2)).sqrt();
+                    let (a, b) = skel.bone(j.child);
+                    (j, d, crate::skeleton::dist_to_segment(*p, a, b))
+                })
+                .filter(|(j, d, _)| *d <= j.thickness * (1.5 + softness))
+                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)));
+            let Some((j, ..)) = near else { continue };
+            // How far past the joint, along the child bone, this point is.
+            let along = (p[0] - j.at[0]) * j.dir[0] + (p[1] - j.at[1]) * j.dir[1];
+            let r = softness * j.thickness;
+            let u = ((along + r) / (2.0 * r)).clamp(0.0, 1.0);
+            let child = u * u * (3.0 - 2.0 * u);
+            *weights = vec![(j.parent, 1.0 - child), (j.child, child)];
+            weights.retain(|&(_, w)| w > 1e-4);
+        }
+    }
+}
+
 impl PartMesh {
     /// The points moved by the bones: each is the weighted mix of where its
     /// bones' transforms (`world_transforms`, one per part) would put it.
@@ -200,6 +276,73 @@ mod tests {
         for (moved, p) in m.deform(&t).iter().zip(&m.points) {
             assert!((moved[0] - (p[0] + 5.0)).abs() < 1e-4 && (moved[1] - (p[1] + 5.0)).abs() < 1e-4);
         }
+    }
+
+    /// A straight vertical "arm" 10 px wide: upper arm from (20,0) to (20,40),
+    /// forearm from (20,40) to (20,80), as two sprites split at the elbow.
+    fn straight_arm() -> (Vec<Sprite>, crate::skeleton::Skeleton, Vec<f32>, usize) {
+        use crate::skeleton::{Joint, SkelPart, Skeleton, distance_transform};
+        let (w, h) = (40u32, 80u32);
+        let mut fg = crate::mask::Mask::new(w, h);
+        for y in 0..h {
+            for x in 15..25 {
+                fg.set(x, y, true);
+            }
+        }
+        let piece = |part: usize, y0: u32, y1: u32| {
+            let mut image = RgbaImage::new(10, y1 - y0);
+            for px in image.pixels_mut() {
+                *px = Rgba([90, 90, 90, 255]);
+            }
+            Sprite { part, image, origin: [15, y0 as i32], pivot: [20.0, y0 as f32] }
+        };
+        let j = |n: &str, y: f32| Joint { name: n.into(), pos: [20.0, y] };
+        let skel = Skeleton {
+            joints: vec![j("shoulder", 0.0), j("elbow", 40.0), j("hand", 80.0)],
+            parts: vec![
+                SkelPart { name: "upper".into(), pivot: 0, tip: 1, parent: None, limit: None, layer: 0 },
+                SkelPart { name: "fore".into(), pivot: 1, tip: 2, parent: Some(0), limit: None, layer: 0 },
+            ],
+        };
+        (vec![piece(0, 0, 40), piece(1, 40, 80)], skel, distance_transform(&fg), w as usize)
+    }
+
+    #[test]
+    fn softness_blends_bones_near_the_joint_and_keeps_the_seam_closed() {
+        let (sprites, skel, dt, w) = straight_arm();
+        let mut meshes = build_meshes(&sprites, 4.0);
+        smooth_weights(&mut meshes, &skel, &dt, w, 1.0);
+        let weight_of = |m: &PartMesh, i: usize, bone: usize| {
+            m.weights[i].iter().find(|&&(b, _)| b == bone).map_or(0.0, |&(_, w)| w)
+        };
+        // Far from the elbow: rigid. At the elbow: half and half. Weights add to 1.
+        let upper = &meshes[0];
+        let top = upper.points.iter().position(|p| p[1] == 0.0).unwrap();
+        assert_eq!(upper.weights[top], vec![(0, 1.0)]);
+        for m in &meshes {
+            for (i, p) in m.points.iter().enumerate() {
+                let total: f32 = m.weights[i].iter().map(|w| w.1).sum();
+                assert!((total - 1.0).abs() < 1e-4);
+                if p[1] == 40.0 {
+                    assert!((weight_of(m, i, 1) - 0.5).abs() < 1e-4, "half and half on the joint line");
+                }
+            }
+        }
+        // Bend the elbow 60°: points the two meshes share land in the same place.
+        let mut t = vec![Affine2::IDENTITY; 2];
+        t[1] = Affine2::rotate_about([20.0, 40.0], 1.0);
+        let (a, b) = (meshes[0].deform(&t), meshes[1].deform(&t));
+        let mut shared = 0;
+        for (i, p) in meshes[0].points.iter().enumerate() {
+            if let Some(k) = meshes[1].points.iter().position(|q| q == p) {
+                assert!((a[i][0] - b[k][0]).abs() < 1e-3 && (a[i][1] - b[k][1]).abs() < 1e-3, "seam point {p:?} stays shut");
+                shared += 1;
+            }
+        }
+        assert!(shared >= 2, "the meshes meet along the elbow");
+        // Softness 0 is rigid.
+        smooth_weights(&mut meshes, &skel, &dt, w, 0.0);
+        assert!(meshes.iter().all(|m| m.weights.iter().all(|w| w.len() == 1 && w[0].0 == m.part)));
     }
 
     #[test]

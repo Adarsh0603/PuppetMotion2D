@@ -37,6 +37,10 @@ pub struct ProjectData {
     /// Keyed animation (empty in projects saved before motion existed).
     #[serde(default)]
     pub motion: Motion,
+    /// How smoothly the drawing bends at the joints (0 = rigid pieces).
+    /// Projects saved before bending existed open rigid, so they look the same.
+    #[serde(default)]
+    pub softness: f32,
 }
 
 fn default_overlap() -> f32 {
@@ -119,6 +123,7 @@ mod tests {
             skeleton: Skeleton::person_front(RectI::new(0, 0, 100, 200)),
             pose,
             overlap: 0.5,
+            softness: 0.8,
             motion: {
                 let mut m = Motion::default();
                 m.offset_x.push(crate::motion::Key { t: 0.5, value: 2.0, ease: crate::motion::Ease::Hold });

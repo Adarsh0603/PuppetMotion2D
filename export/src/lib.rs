@@ -5,7 +5,7 @@
 //! moved by its part's transform, parents first so children sit on top,
 //! sampled with bilinear filtering.
 
-use anim_core::{Pose, RectI, Skeleton, Sprite, world_transforms};
+use anim_core::{PartMesh, Pose, RectI, Skeleton, Sprite, world_transforms};
 use image::RgbaImage;
 use std::io::{self, BufWriter};
 use std::path::Path;
@@ -62,6 +62,10 @@ pub enum Outcome {
 /// Everything needed to render, owned so it can run on another thread.
 pub struct Job {
     pub sprites: Vec<Sprite>,
+    /// Each part's mesh over its sprite (as the canvas draws it), bent by the
+    /// bones. A part without one (or with an empty one) is drawn as its
+    /// sprite turned rigidly.
+    pub meshes: Vec<PartMesh>,
     pub skeleton: Skeleton,
     /// One pose per frame.
     pub poses: Vec<Pose>,
@@ -71,8 +75,15 @@ pub struct Job {
 }
 
 /// The drawing-space area the frames show: the whole drawing, or with `crop`
-/// everything the sprites cover in any of `poses`, plus a margin.
-pub fn frame_area(sprites: &[Sprite], skeleton: &Skeleton, poses: &[Pose], image_size: [u32; 2], crop: bool) -> RectI {
+/// everything the parts cover in any of `poses`, plus a margin.
+pub fn frame_area(
+    sprites: &[Sprite],
+    meshes: &[PartMesh],
+    skeleton: &Skeleton,
+    poses: &[Pose],
+    image_size: [u32; 2],
+    crop: bool,
+) -> RectI {
     let [w, h] = image_size;
     let full = RectI::new(0, 0, w as i32, h as i32);
     if !crop {
@@ -80,15 +91,18 @@ pub fn frame_area(sprites: &[Sprite], skeleton: &Skeleton, poses: &[Pose], image
     }
     let mut lo = [f32::INFINITY; 2];
     let mut hi = [f32::NEG_INFINITY; 2];
+    let mut grow = |p: [f32; 2]| {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    };
     for pose in poses {
         let t = world_transforms(skeleton, pose);
         for s in sprites.iter().filter(|s| s.image.width() > 0 && s.part < t.len()) {
-            for c in sprite_corners(s) {
-                let p = t[s.part].apply(c);
-                for k in 0..2 {
-                    lo[k] = lo[k].min(p[k]);
-                    hi[k] = hi[k].max(p[k]);
-                }
+            match meshes.get(s.part).filter(|m| !m.triangles.is_empty()) {
+                Some(m) => m.deform(&t).into_iter().for_each(&mut grow),
+                None => sprite_corners(s).into_iter().for_each(|c| grow(t[s.part].apply(c))),
             }
         }
     }
@@ -111,7 +125,7 @@ pub fn output_size(area: RectI, scale: f32) -> [u32; 2] {
 impl Job {
     /// The drawing-space area every frame shows.
     pub fn area(&self) -> RectI {
-        frame_area(&self.sprites, &self.skeleton, &self.poses, self.image_size, self.settings.crop)
+        frame_area(&self.sprites, &self.meshes, &self.skeleton, &self.poses, self.image_size, self.settings.crop)
     }
 
     /// Output frame size in pixels.
@@ -131,8 +145,18 @@ impl Job {
         let rest = Pose::rest(self.skeleton.parts.len());
         let t = world_transforms(&self.skeleton, self.poses.get(i).unwrap_or(&rest));
 
+        // Drawing-space point → output pixel coordinates.
+        let to_out = |q: [f32; 2]| [(q[0] - area.x as f32) / sx, (q[1] - area.y as f32) / sy];
         for p in self.skeleton.paint_order() {
             let Some(sprite) = self.sprites.get(p).filter(|s| s.image.width() > 0) else { continue };
+            if let Some(mesh) = self.meshes.get(p).filter(|m| !m.triangles.is_empty()) {
+                let moved: Vec<[f32; 2]> = mesh.deform(&t).into_iter().map(to_out).collect();
+                for tri in &mesh.triangles {
+                    let corner = |k: usize| (moved[tri[k] as usize], mesh.uvs[tri[k] as usize]);
+                    draw_triangle(&mut buf, w, h, [corner(0), corner(1), corner(2)], &sprite.image);
+                }
+                continue;
+            }
             // Output pixels the moved sprite can touch.
             let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);
             for c in sprite_corners(sprite) {
@@ -234,6 +258,54 @@ impl Job {
     }
 }
 
+/// Paint one textured triangle over `buf` (premultiplied RGBA, `w`×`h`).
+/// Corners are (output pixel position, UV on `image`). Each pixel whose
+/// center is inside takes the image's colour at the matching UV, blended on
+/// top. Pixels exactly on an edge belong to one side only (the top-left
+/// rule), so neighbouring triangles never paint a pixel twice.
+fn draw_triangle(buf: &mut [[f32; 4]], w: u32, h: u32, corners: [([f32; 2], [f32; 2]); 3], image: &RgbaImage) {
+    let [(a, ua), (mut b, mut ub), (mut c, mut uc)] = corners;
+    let edge = |p: [f32; 2], q: [f32; 2], r: [f32; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+    let mut area = edge(a, b, c);
+    if area.abs() < 1e-9 {
+        return;
+    }
+    if area < 0.0 {
+        // Make the corners go the same way round every time.
+        std::mem::swap(&mut b, &mut c);
+        std::mem::swap(&mut ub, &mut uc);
+        area = -area;
+    }
+    // Top-left rule: a pixel on an edge counts only for top or left edges.
+    let top_left = |p: [f32; 2], q: [f32; 2]| (p[1] == q[1] && q[0] < p[0]) || q[1] > p[1];
+    let owns = |e: f32, p: [f32; 2], q: [f32; 2]| e > 0.0 || (e == 0.0 && top_left(p, q));
+    let x0 = a[0].min(b[0]).min(c[0]).floor().max(0.0) as u32;
+    let x1 = (a[0].max(b[0]).max(c[0]).ceil().max(0.0) as u32).min(w);
+    let y0 = a[1].min(b[1]).min(c[1]).floor().max(0.0) as u32;
+    let y1 = (a[1].max(b[1]).max(c[1]).ceil().max(0.0) as u32).min(h);
+    let (iw, ih) = (image.width() as f32, image.height() as f32);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let p = [x as f32 + 0.5, y as f32 + 0.5];
+            let (ea, eb, ec) = (edge(b, c, p), edge(c, a, p), edge(a, b, p));
+            if !(owns(ea, b, c) && owns(eb, c, a) && owns(ec, a, b)) {
+                continue;
+            }
+            let (la, lb, lc) = (ea / area, eb / area, ec / area);
+            let u = la * ua[0] + lb * ub[0] + lc * uc[0];
+            let v = la * ua[1] + lb * ub[1] + lc * uc[1];
+            let src = sample(image, u * iw - 0.5, v * ih - 0.5);
+            if src[3] <= 0.0 {
+                continue;
+            }
+            let dst = &mut buf[(y * w + x) as usize];
+            for k in 0..4 {
+                dst[k] = src[k] + dst[k] * (1.0 - src[3]);
+            }
+        }
+    }
+}
+
 fn sprite_corners(s: &Sprite) -> [[f32; 2]; 4] {
     let [x, y] = [s.origin[0] as f32, s.origin[1] as f32];
     let [w, h] = [s.image.width() as f32, s.image.height() as f32];
@@ -282,7 +354,38 @@ mod tests {
         skeleton.add_part(a, b);
         let image = RgbaImage::from_pixel(4, 2, Rgba([255, 0, 0, 255]));
         let sprites = vec![Sprite { part: 0, image, origin: [2, 4], pivot: [2.0, 5.0] }];
-        Job { sprites, skeleton, poses, image_size: [10, 10], settings }
+        let meshes = anim_core::build_meshes(&sprites, 2.0);
+        Job { sprites, meshes, skeleton, poses, image_size: [10, 10], settings }
+    }
+
+    #[test]
+    fn mesh_and_rigid_renders_match_for_a_rigid_part() {
+        // A bigger textured part, turned 30°: drawn as a mesh and as a rigid sprite.
+        let mut skeleton = Skeleton::empty();
+        let (a, b) = (skeleton.add_joint([10.0, 20.0]), skeleton.add_joint([40.0, 20.0]));
+        skeleton.add_part(a, b);
+        let image = RgbaImage::from_fn(30, 12, |x, y| Rgba([(x * 8) as u8, (y * 20) as u8, 100, 255]));
+        let sprites = vec![Sprite { part: 0, image, origin: [10, 14], pivot: [10.0, 20.0] }];
+        let mut pose = Pose::rest(1);
+        pose.set_angle(0, 0.5);
+        let settings = uncropped(None);
+        let meshed = Job { meshes: anim_core::build_meshes(&sprites, 5.0), ..rigid_job(&sprites, &skeleton, &pose, settings) };
+        let rigid = rigid_job(&sprites, &skeleton, &pose, settings);
+        let (m, r) = (meshed.render_frame(0), rigid.render_frame(0));
+        let differ = m.pixels().zip(r.pixels()).filter(|(p, q)| p.0.iter().zip(q.0).any(|(x, y)| x.abs_diff(y) > 2)).count();
+        // Only a few pixels right on the part's outline may round differently.
+        assert!(differ <= m.width() as usize, "{differ} pixels differ");
+    }
+
+    fn rigid_job(sprites: &[Sprite], skeleton: &Skeleton, pose: &Pose, settings: Settings) -> Job {
+        Job {
+            sprites: sprites.to_vec(),
+            meshes: Vec::new(),
+            skeleton: skeleton.clone(),
+            poses: vec![pose.clone()],
+            image_size: [60, 50],
+            settings,
+        }
     }
 
     fn uncropped(background: Option<[u8; 3]>) -> Settings {

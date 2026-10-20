@@ -3,7 +3,7 @@ use crate::export::ExportUi;
 use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Ease, History, KeyRef, PartMesh, Template, Toward, build_meshes, cell_size, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    Clip, Ease, History, KeyRef, PartMesh, Template, Toward, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
     NO_PART, distance_transform, foreground_mask, load_project, project, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -30,6 +30,9 @@ pub const PALETTE: [[u8; 3]; 12] = [
 /// zoomed in, and with mipmaps when zoomed out, so a big drawing shrunk to fit
 /// the window stays smooth instead of jagged.
 const SMOOTH: TextureOptions = TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
+
+/// Joint softness for new drawings: elbows and knees bend smoothly.
+const DEFAULT_SOFTNESS: f32 = 0.8;
 
 /// Undo steps kept per drawing.
 const UNDO_LIMIT: usize = 200;
@@ -247,6 +250,9 @@ pub struct AppState {
     pub show_parts: bool,
     /// Joint disc radius as a multiple of the child part's thickness (0 = no discs).
     pub overlap: f32,
+    /// How smoothly the drawing bends at the joints: the blend band's half-width
+    /// as a multiple of the drawing's thickness there (0 = rigid pieces). Saved.
+    pub softness: f32,
     /// Animate step: show the original drawing faintly behind the posed parts.
     pub show_ghost: bool,
     /// Animate step: draw bones and joint dots over the parts (B toggles).
@@ -299,6 +305,7 @@ impl Default for AppState {
             skel_sel: SkelSel::None,
             show_parts: true,
             overlap: 1.0,
+            softness: DEFAULT_SOFTNESS,
             show_ghost: false,
             show_bones: true,
             show_mesh: false,
@@ -338,6 +345,8 @@ impl AppState {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let ext = path.extension().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
         let Some(mut doc) = self.load_doc(ctx, &name, bytes, ext) else { return };
+        // A new drawing bends smoothly by default (an opened project keeps its own setting).
+        self.softness = DEFAULT_SOFTNESS;
         // Start with the template last used (Person (front) at first), facing the same way.
         if let Some(t) = self.templates.get(self.template_choice).or(self.templates.first()) {
             doc.fit_skeleton(&self.facing(t));
@@ -359,6 +368,7 @@ impl AppState {
         // Settings first: the figure is found using the project's own cutout settings.
         self.params = data.params;
         self.overlap = data.overlap;
+        self.softness = data.softness;
         let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext) else { return };
         doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion });
         doc.recompute_skeleton();
@@ -719,6 +729,7 @@ impl AppState {
             skeleton: doc.skeleton.clone(),
             pose: doc.pose.clone(),
             overlap: self.overlap,
+            softness: self.softness,
             motion: doc.motion.clone(),
         })
     }
@@ -863,6 +874,7 @@ impl AppState {
         doc.skel_masks = masks_from_labels(&doc.skel_labels, doc.fg.w, doc.fg.h, doc.skeleton.parts.len());
         doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap);
         doc.meshes = build_meshes(&doc.sprites, cell_size(doc.figure_box()));
+        smooth_weights(&mut doc.meshes, &doc.skeleton, &doc.dt, doc.fg.w as usize, self.softness);
         doc.sprite_tex = doc
             .sprites
             .iter()
@@ -1102,6 +1114,18 @@ impl AppState {
             ui.checkbox(&mut self.show_bones, "Show bones").on_hover_text("B: hide them to watch just the animation");
             ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
             ui.checkbox(&mut self.show_mesh, "Show mesh").on_hover_text("The triangles the drawing bends with");
+        });
+        card(ui, "Joints", |ui| {
+            let before = self.softness;
+            ui.add(egui::Slider::new(&mut self.softness, 0.0..=2.0).text("softness"))
+                .on_hover_text("How smoothly elbows, knees and other joints bend.\n0 = stiff cut-out pieces, higher = a wider, softer bend.");
+            if before != self.softness
+                && let Some(doc) = &mut self.doc
+            {
+                // Only the weights change, which is quick enough to redo while dragging.
+                smooth_weights(&mut doc.meshes, &doc.skeleton, &doc.dt, doc.fg.w as usize, self.softness);
+                doc.dirty = true;
+            }
         });
         self.layers_list(ui);
         fold(ui, "Fine-tune joints", |ui| {
@@ -1871,6 +1895,14 @@ mod tests {
         let mut state = open_sample();
         let ctx = egui::Context::default();
         state.set_step(Step::Animate);
+        // A new drawing bends at the joints: some points follow two bones.
+        state.refresh_sprites(&ctx);
+        let doc = state.doc.as_ref().unwrap();
+        assert!(state.softness > 0.0);
+        assert!(doc.meshes.iter().any(|m| m.weights.iter().any(|w| w.len() == 2)), "blended near joints");
+        // Softness 0: rigid pieces again.
+        state.softness = 0.0;
+        state.doc.as_mut().unwrap().sprites_dirty = true;
         state.refresh_sprites(&ctx);
         let doc = state.doc.as_ref().unwrap();
         assert_eq!(doc.meshes.len(), doc.skeleton.parts.len());

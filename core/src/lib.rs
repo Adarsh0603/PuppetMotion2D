@@ -19,7 +19,7 @@ pub use cutout::{Params, foreground_mask};
 pub use geom::RectI;
 pub use history::History;
 pub use mask::Mask;
-pub use mesh::{PartMesh, build_meshes, cell_size};
+pub use mesh::{PartMesh, build_meshes, cell_size, smooth_weights};
 pub use motion::{Clip, Ease, Key, KeyRef, Motion, TrackId};
 pub use project::{LoadedProject, ProjectData, load_project, save_project};
 pub use rig::{

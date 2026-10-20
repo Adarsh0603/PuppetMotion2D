@@ -41,7 +41,7 @@ pub fn frame_rect(state: &AppState) -> Option<RectI> {
     let doc = state.doc.as_ref()?;
     let s = &state.export.settings;
     let poses = frame_poses(state, s.fps);
-    Some(frame_area(&doc.sprites, &doc.skeleton, &poses, [doc.image.width(), doc.image.height()], s.crop))
+    Some(frame_area(&doc.sprites, &doc.meshes, &doc.skeleton, &poses, [doc.image.width(), doc.image.height()], s.crop))
 }
 
 /// The Export step's side panel.
@@ -65,7 +65,7 @@ pub fn panel(ui: &mut egui::Ui, state: &mut AppState) {
     let settings = state.export.settings;
     let poses = frame_poses(state, settings.fps);
     let doc = state.doc.as_ref().unwrap();
-    let area = frame_area(&doc.sprites, &doc.skeleton, &poses, [doc.image.width(), doc.image.height()], settings.crop);
+    let area = frame_area(&doc.sprites, &doc.meshes, &doc.skeleton, &poses, [doc.image.width(), doc.image.height()], settings.crop);
     let [w, h] = output_size(area, settings.scale);
     let no_keys = doc.motion.is_empty();
     card(ui, "Preview", |ui| {
@@ -183,6 +183,7 @@ fn begin(state: &mut AppState) {
     };
     let job = Job {
         sprites: doc.sprites.clone(),
+        meshes: doc.meshes.clone(),
         skeleton: doc.skeleton.clone(),
         poses: frame_poses(state, settings.fps),
         image_size: [doc.image.width(), doc.image.height()],
