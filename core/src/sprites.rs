@@ -108,8 +108,8 @@ mod tests {
         let skel = Skeleton {
             joints: vec![j("pelvis", 60.0, 95.0), j("neck", 60.0, 22.0), j("shoulder", 42.0, 26.0), j("hand", 6.0, 26.0)],
             parts: vec![
-                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None },
-                SkelPart { name: "left arm".into(), pivot: 2, tip: 3, parent: Some(0), limit: None },
+                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None, layer: 0 },
+                SkelPart { name: "left arm".into(), pivot: 2, tip: 3, parent: Some(0), limit: None, layer: 0 },
             ],
         };
         (img, fg, skel)
@@ -170,8 +170,8 @@ mod tests {
         let skel = Skeleton {
             joints: vec![j("pelvis", 60.0, 175.0), j("neck", 60.0, 90.0), j("head top", 60.0, 12.0)],
             parts: vec![
-                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None },
-                SkelPart { name: "head".into(), pivot: 1, tip: 2, parent: Some(0), limit: None },
+                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None, layer: 0 },
+                SkelPart { name: "head".into(), pivot: 1, tip: 2, parent: Some(0), limit: None, layer: 0 },
             ],
         };
         let sm = skeleton_masks(&fg, &skel);

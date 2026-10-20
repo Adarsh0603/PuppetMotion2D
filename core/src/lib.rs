@@ -22,4 +22,4 @@ pub use rig::{
     Affine2, Pose, aim_part, angle_to_point, clamp_to_limit, ik_parent, posed_joint, solve_two_bone, world_transforms,
 };
 pub use sprites::{Sprite, build_sprites};
-pub use skeleton::{Joint, SkelPart, Skeleton, SkeletonMasks, skeleton_masks};
+pub use skeleton::{Joint, SkelPart, Skeleton, SkeletonMasks, Toward, skeleton_masks};

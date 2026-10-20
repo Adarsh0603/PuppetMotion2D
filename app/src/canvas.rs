@@ -4,7 +4,7 @@
 
 use crate::state::{AppState, SkelSel, Step, part_color};
 use anim_core::skeleton::dist_to_segment;
-use anim_core::{Affine2, RectI, aim_part, ik_parent, posed_joint, solve_two_bone, world_transforms};
+use anim_core::{Affine2, RectI, Toward, aim_part, ik_parent, posed_joint, solve_two_bone, world_transforms};
 use eframe::egui::{self, Color32, Key, PointerButton, Pos2, Rect, Sense, Stroke, Vec2, pos2, vec2};
 
 const JOINT_HIT_PX: f32 = 10.0;
@@ -98,6 +98,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     if state.step == Step::Rig && (key(Key::Delete) || key(Key::Backspace)) {
         state.delete_skel_selection();
     }
+    // [ and ]: send the selected bone back or bring it forward.
+    if state.step == Step::Rig
+        && let SkelSel::Part(p) = state.skel_sel
+    {
+        if key(Key::OpenBracket) {
+            state.change_layer(p, Toward::Back);
+        } else if key(Key::CloseBracket) {
+            state.change_layer(p, Toward::Front);
+        }
+    }
 
     // Zoom with scroll wheel / pinch around the cursor.
     if let Some(hover) = response.hover_pos() {
@@ -175,7 +185,7 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
     let t = world_transforms(skel, &doc.pose);
     let to_screen = |p: [f32; 2]| view.image_to_screen(canvas, pos2(p[0], p[1]));
 
-    for p in skel.draw_order() {
+    for p in skel.paint_order() {
         let (Some(sprite), Some(Some(tex))) = (doc.sprites.get(p), doc.sprite_tex.get(p)) else { continue };
         let [ox, oy] = [sprite.origin[0] as f32, sprite.origin[1] as f32];
         let [w, h] = [sprite.image.width() as f32, sprite.image.height() as f32];
@@ -190,8 +200,15 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
         painter.add(egui::Shape::mesh(mesh));
     }
 
+    let joints = posed_joints(state);
+    // A part pointed at in the Layers list is shown even with bones hidden.
+    let listed = state.highlight_part.filter(|&p| p < skel.parts.len());
+
     // "Show bones" off (B): just the animation. Dragging still works; the dots are only hidden.
     if !bones {
+        if let Some(p) = listed {
+            highlight_bone(painter, &to_screen, skel, &joints, p);
+        }
         return;
     }
 
@@ -206,7 +223,6 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
         }
     }
 
-    let joints = posed_joints(state);
     for (i, part) in skel.parts.iter().enumerate() {
         let (a, b) = (to_screen(joints[part.pivot]), to_screen(joints[part.tip]));
         painter.line_segment([a, b], Stroke::new(3.0, Color32::from_black_alpha(140)));
@@ -216,6 +232,15 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
         Drag::PoseRotate { part } => Some(skel.parts[part].tip),
         _ => hover.and_then(|h| hit_point(state, canvas, &joints, h)),
     };
+    // The bone under the mouse (when not on a joint and not dragging), named like joints are.
+    let hovered_bone = match (active, state.drag) {
+        (None, Drag::None) => hover.and_then(|h| hit_posed_bone(skel, &joints, &to_screen, h)),
+        _ => None,
+    };
+    let shown = listed.or(hovered_bone);
+    if let Some(p) = shown {
+        highlight_bone(painter, &to_screen, skel, &joints, p);
+    }
     for (j, &pos) in joints.iter().enumerate() {
         let r = if active == Some(j) { 7.0 } else { 5.0 };
         let fill = if pose_drag_for_joint(skel, j).is_some() { Color32::WHITE } else { Color32::GRAY };
@@ -224,6 +249,38 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
     if let Some(j) = active {
         label(painter, to_screen(joints[j]) + vec2(10.0, -10.0), &skel.joints[j].name);
     }
+}
+
+/// A bone drawn thick with a white outline and its name, to point it out.
+fn highlight_bone(
+    painter: &egui::Painter,
+    to_screen: &impl Fn([f32; 2]) -> Pos2,
+    skel: &anim_core::Skeleton,
+    joints: &[[f32; 2]],
+    part: usize,
+) {
+    let p = &skel.parts[part];
+    let (a, b) = (to_screen(joints[p.pivot]), to_screen(joints[p.tip]));
+    painter.line_segment([a, b], Stroke::new(7.0, Color32::WHITE));
+    painter.line_segment([a, b], Stroke::new(4.0, part_color(part)));
+    label(painter, a.lerp(b, 0.5) + vec2(10.0, 8.0), &p.name);
+}
+
+/// Posed bone under the screen position `h`, if any (nearest within a few points).
+fn hit_posed_bone(
+    skel: &anim_core::Skeleton,
+    joints: &[[f32; 2]],
+    to_screen: &impl Fn([f32; 2]) -> Pos2,
+    h: Pos2,
+) -> Option<usize> {
+    (0..skel.parts.len())
+        .map(|i| {
+            let (a, b) = (to_screen(joints[skel.parts[i].pivot]), to_screen(joints[skel.parts[i].tip]));
+            (i, dist_to_segment([h.x, h.y], [a.x, a.y], [b.x, b.y]))
+        })
+        .filter(|&(_, d)| d <= BONE_HIT_PX)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
 }
 
 /// A wedge at a part's pivot showing the directions its limit allows the bone

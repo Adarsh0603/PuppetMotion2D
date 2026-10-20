@@ -131,7 +131,7 @@ impl Job {
         let rest = Pose::rest(self.skeleton.parts.len());
         let t = world_transforms(&self.skeleton, self.poses.get(i).unwrap_or(&rest));
 
-        for p in self.skeleton.draw_order() {
+        for p in self.skeleton.paint_order() {
             let Some(sprite) = self.sprites.get(p).filter(|s| s.image.width() > 0) else { continue };
             // Output pixels the moved sprite can touch.
             let (mut lo, mut hi) = ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]);

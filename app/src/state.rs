@@ -2,7 +2,7 @@ use crate::canvas::{Drag, View};
 use crate::export::ExportUi;
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Ease, History, KeyRef, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    Clip, Ease, History, KeyRef, Toward, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
     foreground_mask, load_project, project, save_project, skeleton_masks,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -216,6 +216,8 @@ pub struct AppState {
     pub show_ghost: bool,
     /// Animate step: draw bones and joint dots over the parts (B toggles).
     pub show_bones: bool,
+    /// Part whose row the pointer is on in the Layers list; the canvas lights it up.
+    pub highlight_part: Option<usize>,
     pub status: String,
     /// Set when a new image is loaded so the canvas fits it on the next frame.
     pub fit_pending: bool,
@@ -251,6 +253,7 @@ impl Default for AppState {
             overlap: 1.0,
             show_ghost: false,
             show_bones: true,
+            highlight_part: None,
             status: "Open or drop a drawing to start.".into(),
             fit_pending: false,
             export: ExportUi::default(),
@@ -804,6 +807,24 @@ impl AppState {
             .collect();
     }
 
+    /// Move bone `p` (with the bones hanging from it) in the painting order,
+    /// as one undo step. The pose is kept.
+    pub fn change_layer(&mut self, p: usize, to: Toward) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        if p >= doc.skeleton.parts.len() || !doc.skeleton.move_layer(p, to) {
+            return;
+        }
+        let name = &doc.skeleton.parts[p].name;
+        self.status = match to {
+            Toward::Front => format!("Moved {name} forward"),
+            Toward::Back => format!("Moved {name} back"),
+            Toward::FrontMost => format!("Moved {name} to the front"),
+            Toward::BackMost => format!("Moved {name} to the back"),
+        };
+        self.commit(before);
+    }
+
     /// Delete the selected joint or bone (Rig step).
     pub fn delete_skel_selection(&mut self) {
         match std::mem::replace(&mut self.skel_sel, SkelSel::None) {
@@ -887,6 +908,8 @@ impl AppState {
 
     /// The side panel: the current step's title and controls.
     pub fn side_panel(&mut self, ui: &mut egui::Ui) {
+        // Set again below while the pointer is on a Layers row.
+        self.highlight_part = None;
         ui.heading(self.step.label());
         ui.label(egui::RichText::new(self.step.hint()).weak());
         ui.separator();
@@ -977,6 +1000,7 @@ impl AppState {
                 doc.dirty = true;
             }
         });
+        self.layers_list(ui);
         ui.separator();
         Self::shortcut_help(
             ui,
@@ -988,6 +1012,46 @@ impl AppState {
              Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
              Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
         );
+    }
+
+    /// "Layers": every part from front (top) to back, with buttons to move it
+    /// one row or to either end. Parts attached to it move with it.
+    fn layers_list(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = &self.doc else { return };
+        let skel = &doc.skeleton;
+        let front_to_back: Vec<usize> = skel.paint_order().into_iter().rev().collect();
+        let mut change = None;
+        let mut hovered = None;
+        egui::CollapsingHeader::new("Layers (what's in front)").default_open(false).show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("The top of the list is in front. Parts attached to a part move with it.").weak(),
+            );
+            for (row, &p) in front_to_back.iter().enumerate() {
+                let (top, bottom) = (row == 0, row + 1 == front_to_back.len());
+                let line = ui.horizontal(|ui| {
+                    let buttons = [
+                        ("⏫", "To the front", Toward::FrontMost, !top),
+                        ("▲", "Up one", Toward::Front, !top),
+                        ("▼", "Down one", Toward::Back, !bottom),
+                        ("⏬", "To the back", Toward::BackMost, !bottom),
+                    ];
+                    for (icon, hint, to, enabled) in buttons {
+                        if ui.add_enabled(enabled, egui::Button::new(icon).small()).on_hover_text(hint).clicked() {
+                            change = Some((p, to));
+                        }
+                    }
+                    ui.label(egui::RichText::new(&skel.parts[p].name).color(part_color(p)));
+                });
+                // Pointing at a row lights up that part's bone on the canvas.
+                if line.response.contains_pointer() {
+                    hovered = Some(p);
+                }
+            }
+        });
+        self.highlight_part = hovered;
+        if let Some((p, to)) = change {
+            self.change_layer(p, to);
+        }
     }
 
     fn rig_section(&mut self, ui: &mut egui::Ui) {
@@ -1063,6 +1127,20 @@ impl AppState {
             if let SkelSel::Part(p) = sel {
                 self.parent_picker(ui, p);
                 self.limit_editor(ui, p);
+                ui.horizontal(|ui| {
+                    ui.label("Layer").on_hover_text("What's drawn in front. Bones attached to this one move with it.");
+                    let buttons = [
+                        ("To back", "Behind everything", Toward::BackMost),
+                        ("Back", "One place back  [", Toward::Back),
+                        ("Forward", "One place forward  ]", Toward::Front),
+                        ("To front", "In front of everything", Toward::FrontMost),
+                    ];
+                    for (label, hint, to) in buttons {
+                        if ui.button(label).on_hover_text(hint).clicked() {
+                            self.change_layer(p, to);
+                        }
+                    }
+                });
             }
             let delete = if matches!(sel, SkelSel::Joint(_)) { "Delete joint and its bones" } else { "Delete bone" };
             if ui.button(delete).clicked() {
@@ -1077,6 +1155,7 @@ impl AppState {
              Shift+drag from a joint: grow a new bone\n\
              Shift+drag on empty space: start a new bone\n\
              Click a joint or bone: select it   Delete: remove it\n\
+             [ and ]: send the selected bone back / bring it forward\n\
              Ctrl+Z: undo   Ctrl+Shift+Z: redo\n\
              Middle-drag or Space+drag: pan   Scroll: zoom   F: fit",
         );
@@ -1486,6 +1565,25 @@ mod tests {
         state.commit(before);
         let m = &state.doc.as_ref().unwrap().motion;
         assert!(m.tracks.contains_key("big head") && !m.tracks.contains_key("head"));
+    }
+
+    #[test]
+    fn layers_change_paint_order_keep_the_pose_and_undo() {
+        let mut state = open_sample();
+        state.set_step(Step::Animate);
+        let arm = {
+            let s = &state.doc.as_ref().unwrap().skeleton;
+            s.parts.iter().position(|p| p.name == "left upper arm").unwrap()
+        };
+        state.doc.as_mut().unwrap().pose.set_angle(arm, 0.4);
+        let before = state.doc.as_ref().unwrap().skeleton.paint_order();
+        state.change_layer(arm, Toward::BackMost);
+        let doc = state.doc.as_ref().unwrap();
+        assert_eq!(doc.skeleton.paint_order()[0], arm, "sent behind everything");
+        assert_eq!(doc.pose.angle(arm), 0.4, "the pose is kept");
+        assert!(doc.dirty);
+        state.undo();
+        assert_eq!(state.doc.as_ref().unwrap().skeleton.paint_order(), before);
     }
 
     #[test]

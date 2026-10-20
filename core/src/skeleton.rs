@@ -21,6 +21,8 @@ pub struct Joint {
 /// `parent` is the part it hangs from (None for a root such as the torso).
 /// `limit` is the allowed rotation range `[min, max]` in radians relative to
 /// the parent (0 = as drawn); None means it can turn freely.
+/// `layer` is the part's place in the painting order, lowest at the back;
+/// see `Skeleton::paint_order`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SkelPart {
     pub name: String,
@@ -29,6 +31,21 @@ pub struct SkelPart {
     pub parent: Option<usize>,
     #[serde(default)]
     pub limit: Option<[f32; 2]>,
+    #[serde(default)]
+    pub layer: i32,
+}
+
+/// Where `Skeleton::move_layer` moves a part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Toward {
+    /// One place nearer the front.
+    Front,
+    /// One place nearer the back.
+    Back,
+    /// In front of everything.
+    FrontMost,
+    /// Behind everything.
+    BackMost,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -85,6 +102,7 @@ impl Skeleton {
                     tip,
                     parent,
                     limit: limit.map(|d| [-d.to_radians(), d.to_radians()]),
+                    layer: 0,
                 })
                 .collect(),
         }
@@ -112,7 +130,9 @@ impl Skeleton {
     pub fn add_part(&mut self, pivot: usize, tip: usize) -> usize {
         let name = unique_name("bone", self.parts.iter().map(|p| p.name.as_str()));
         let parent = self.guess_parent(pivot);
-        self.parts.push(SkelPart { name, pivot, tip, parent, limit: None });
+        // A new bone goes in front of everything, where it can be seen.
+        let layer = self.parts.iter().map(|p| p.layer + 1).max().unwrap_or(0);
+        self.parts.push(SkelPart { name, pivot, tip, parent, limit: None, layer });
         self.parts.len() - 1
     }
 
@@ -214,6 +234,48 @@ impl Skeleton {
         // Anything unreachable (only possible with a corrupted loop) goes last.
         order.extend((0..self.parts.len()).filter(|&i| !seen[i]));
         order
+    }
+
+    /// The order to paint parts in, back to front: by `layer`, and for equal
+    /// layers (a fresh template has all 0) parents before children, as
+    /// `draw_order`. Use this for drawing; use `draw_order` for transforms.
+    pub fn paint_order(&self) -> Vec<usize> {
+        let mut order = self.draw_order();
+        order.sort_by_key(|&p| self.parts[p].layer); // stable: ties keep hierarchy order
+        order
+    }
+
+    /// Move `part` in the painting order: one place toward the front
+    /// (`Toward::Front`), one back, or all the way to either end. The parts
+    /// hanging from it come along and sit just in front of it, so a limb
+    /// stays together. Returns whether anything moved.
+    pub fn move_layer(&mut self, part: usize, to: Toward) -> bool {
+        if part >= self.parts.len() {
+            return false;
+        }
+        let old = self.paint_order();
+        // The part, then its descendants in their current order.
+        let family: Vec<usize> = std::iter::once(part)
+            .chain(old.iter().copied().filter(|&p| p != part && self.descendants(part).contains(&p)))
+            .collect();
+        let rest: Vec<usize> = old.iter().copied().filter(|p| !family.contains(p)).collect();
+        // Where the part sits among the others now, then where it goes.
+        let here = old.iter().take_while(|&&p| p != part).filter(|p| !family.contains(p)).count();
+        let to = match to {
+            Toward::Front => (here + 1).min(rest.len()),
+            Toward::Back => here.saturating_sub(1),
+            Toward::FrontMost => rest.len(),
+            Toward::BackMost => 0,
+        };
+        let mut new = rest;
+        new.splice(to..to, family);
+        if new == old {
+            return false;
+        }
+        for (i, &p) in new.iter().enumerate() {
+            self.parts[p].layer = i as i32;
+        }
+        true
     }
 
     /// All parts depth-first as `(part, depth)`, each child listed right under
@@ -420,8 +482,8 @@ mod tests {
         let skel = Skeleton {
             joints: vec![j("pelvis", 60.0, 95.0), j("neck", 60.0, 22.0), j("shoulder", 42.0, 26.0), j("hand", 6.0, 26.0)],
             parts: vec![
-                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None },
-                SkelPart { name: "arm".into(), pivot: 2, tip: 3, parent: Some(0), limit: None },
+                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None, layer: 0 },
+                SkelPart { name: "arm".into(), pivot: 2, tip: 3, parent: Some(0), limit: None, layer: 0 },
             ],
         };
         (fg, skel)
@@ -489,8 +551,8 @@ mod tests {
         let skel = Skeleton {
             joints: vec![j("pelvis", 60.0, 175.0), j("neck", 60.0, 90.0), j("head top", 60.0, 12.0)],
             parts: vec![
-                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None },
-                SkelPart { name: "head".into(), pivot: 1, tip: 2, parent: Some(0), limit: None },
+                SkelPart { name: "torso".into(), pivot: 0, tip: 1, parent: None, limit: None, layer: 0 },
+                SkelPart { name: "head".into(), pivot: 1, tip: 2, parent: Some(0), limit: None, layer: 0 },
             ],
         };
         let sm = skeleton_masks(&fg, &skel);
@@ -500,6 +562,46 @@ mod tests {
         }
         assert!(sm.masks[1].get(60, 50) && sm.masks[1].get(25, 50), "head keeps the whole head");
         assert!(sm.masks[1].get(60, 13), "free end (head top) is still covered");
+    }
+
+    #[test]
+    fn layers_paint_parts_behind_with_their_children() {
+        let mut s = Skeleton::person_front(RectI::new(0, 0, 100, 200));
+        let name = |s: &Skeleton, n: &str| s.parts.iter().position(|p| p.name == n).unwrap();
+        let (torso, arm, forearm) = (name(&s, "torso"), name(&s, "left upper arm"), name(&s, "left forearm"));
+        assert_eq!(s.paint_order(), s.draw_order(), "all layers 0: same as the hierarchy");
+        let at = |s: &Skeleton, p: usize| s.paint_order().iter().position(|&q| q == p).unwrap();
+
+        // One step back moves the arm past exactly one other part, and its
+        // forearm comes along, right in front of it.
+        let before = s.paint_order();
+        let others: Vec<usize> = before.iter().copied().filter(|&p| p != arm && p != forearm).collect();
+        let arm_among = before.iter().take_while(|&&p| p != arm).filter(|&&p| p != forearm).count();
+        assert!(s.move_layer(arm, Toward::Back));
+        let order = s.paint_order();
+        assert_eq!(order.iter().position(|&p| p == forearm), order.iter().position(|&p| p == arm).map(|i| i + 1));
+        let now_among = order.iter().take_while(|&&p| p != arm).count();
+        assert_eq!(now_among, arm_among - 1, "exactly one place back");
+        assert_eq!(order.iter().copied().filter(|p| others.contains(p)).collect::<Vec<_>>(), others, "others keep their order");
+
+        // To the back: behind the torso, still in one piece.
+        assert!(s.move_layer(arm, Toward::BackMost));
+        assert_eq!(&s.paint_order()[..2], &[arm, forearm]);
+        assert!(at(&s, arm) < at(&s, torso));
+        assert!(!s.move_layer(arm, Toward::BackMost), "already at the back");
+
+        // A child alone can move forward one place.
+        assert!(s.move_layer(forearm, Toward::Front));
+        assert_eq!(at(&s, forearm), 2);
+
+        // A new bone appears in front.
+        let (a, b) = (s.add_joint([0.0, 0.0]), s.add_joint([5.0, 5.0]));
+        let new = s.add_part(a, b);
+        assert_eq!(*s.paint_order().last().unwrap(), new);
+
+        // Older projects without layers load as 0.
+        let old: SkelPart = serde_json::from_str(r#"{"name": "a", "pivot": 0, "tip": 1, "parent": null}"#).unwrap();
+        assert_eq!(old.layer, 0);
     }
 
     #[test]
