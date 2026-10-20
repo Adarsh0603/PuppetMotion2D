@@ -1,8 +1,13 @@
 [package]
-name = "anim-app"
+name = "puppetmotion"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+
+# The app's .exe is named after the product.
+[[bin]]
+name = "PuppetMotion2D"
+path = "src/main.rs"
 
 [dependencies]
 anim-core = { version = "0.1.0", path = "../core" }

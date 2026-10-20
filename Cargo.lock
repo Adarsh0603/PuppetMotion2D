@@ -204,18 +204,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anim-app"
-version = "0.1.0"
-dependencies = [
- "anim-core",
- "anim-export",
- "eframe",
- "image",
- "rfd",
- "winresource",
-]
-
-[[package]]
 name = "anim-core"
 version = "0.1.0"
 dependencies = [
@@ -3024,6 +3012,18 @@ name = "pulp-wasm-simd-flag"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d8f70e07b9c3962945a74e59ca1c511bba65b6419468acc217c457d93f3c740"
+
+[[package]]
+name = "puppetmotion"
+version = "0.1.0"
+dependencies = [
+ "anim-core",
+ "anim-export",
+ "eframe",
+ "image",
+ "rfd",
+ "winresource",
+]
 
 [[package]]
 name = "pxfm"

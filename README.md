@@ -41,8 +41,10 @@ You need [Rust](https://rustup.rs) (stable).
 ```
 git clone https://github.com/Adarsh0603/PuppetMotion2D.git
 cd PuppetMotion2D
-cargo run --release -p anim-app
+cargo run --release -p puppetmotion
 ```
+
+The app is built as `target/release/PuppetMotion2D.exe`.
 
 Run the tests with `cargo test --workspace`.
 
