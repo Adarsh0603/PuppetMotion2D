@@ -24,6 +24,9 @@ fn main() -> eframe::Result {
             .with_icon(icon)
             .with_inner_size([1280.0, 800.0])
             .with_drag_and_drop(true),
+        // The OpenGL renderer builds mipmaps for our textures (the wgpu one
+        // ignores them), so a big drawing shrunk to fit stays smooth.
+        renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
     eframe::run_native(

@@ -120,7 +120,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
 
     handle_pointer(ui, &response, canvas, state);
     state.refresh_overlay(ui.ctx());
-    if state.step.shows_pose() {
+    // Rig only needs the meshes for "Show mesh", and rebuilding them is too
+    // slow to do on every frame of a joint drag, so they catch up on release.
+    let rig_mesh = state.step == Step::Rig && state.show_mesh && matches!(state.drag, Drag::None);
+    if state.step.shows_pose() || rig_mesh {
         state.refresh_sprites(ui.ctx());
     }
 
@@ -136,6 +139,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 painter.image(overlay.id(), image_rect, uv, Color32::WHITE);
             }
             if state.step == Step::Rig {
+                if state.show_mesh {
+                    let to_screen = |p: &[f32; 2]| view.image_to_screen(canvas, pos2(p[0], p[1]));
+                    for m in &doc.meshes {
+                        let points: Vec<Pos2> = m.points.iter().map(to_screen).collect();
+                        draw_wireframe(&painter, &points, &m.triangles, part_color(m.part));
+                    }
+                }
                 draw_skeleton(&painter, canvas, state, response.hover_pos());
             }
         }
@@ -185,19 +195,25 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
     let t = world_transforms(skel, &doc.pose);
     let to_screen = |p: [f32; 2]| view.image_to_screen(canvas, pos2(p[0], p[1]));
 
+    // Each part is its triangle mesh over its sprite, bent by the bones.
+    let mut wire = Vec::new();
     for p in skel.paint_order() {
-        let (Some(sprite), Some(Some(tex))) = (doc.sprites.get(p), doc.sprite_tex.get(p)) else { continue };
-        let [ox, oy] = [sprite.origin[0] as f32, sprite.origin[1] as f32];
-        let [w, h] = [sprite.image.width() as f32, sprite.image.height() as f32];
-        let corners = [[ox, oy], [ox + w, oy], [ox + w, oy + h], [ox, oy + h]];
-        let uvs = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0), pos2(0.0, 1.0)];
+        let (Some(part), Some(Some(tex))) = (doc.meshes.get(p), doc.sprite_tex.get(p)) else { continue };
+        let moved: Vec<Pos2> = part.deform(&t).into_iter().map(to_screen).collect();
         let mut mesh = egui::Mesh::with_texture(tex.id());
-        for (c, uv) in corners.iter().zip(uvs) {
-            mesh.vertices.push(egui::epaint::Vertex { pos: to_screen(t[p].apply(*c)), uv, color: Color32::WHITE });
+        for (&pos, uv) in moved.iter().zip(&part.uvs) {
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv: pos2(uv[0], uv[1]), color: Color32::WHITE });
         }
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(0, 2, 3);
+        for tri in &part.triangles {
+            mesh.add_triangle(tri[0], tri[1], tri[2]);
+        }
         painter.add(egui::Shape::mesh(mesh));
+        if state.show_mesh {
+            wire.push((p, moved, &part.triangles));
+        }
+    }
+    for (p, points, triangles) in wire {
+        draw_wireframe(painter, &points, triangles, part_color(p));
     }
 
     let joints = posed_joints(state);
@@ -248,6 +264,17 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
     }
     if let Some(j) = active {
         label(painter, to_screen(joints[j]) + vec2(10.0, -10.0), &skel.joints[j].name);
+    }
+}
+
+/// A mesh's triangle edges as thin lines (screen points).
+fn draw_wireframe(painter: &egui::Painter, points: &[Pos2], triangles: &[[u32; 3]], color: Color32) {
+    let stroke = Stroke::new(1.0, color.gamma_multiply(0.7));
+    for t in triangles {
+        let (a, b, c) = (points[t[0] as usize], points[t[1] as usize], points[t[2] as usize]);
+        painter.line_segment([a, b], stroke);
+        painter.line_segment([b, c], stroke);
+        painter.line_segment([c, a], stroke);
     }
 }
 

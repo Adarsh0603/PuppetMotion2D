@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anim-core = { version = "0.1.0", path = "../core" }
 anim-export = { version = "0.1.0", path = "../export" }
-eframe = "0.37.0"
+eframe = { version = "0.37.0", features = ["glow"] }
 image = "0.25.10"
 rfd = "0.17.2"
 

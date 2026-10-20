@@ -3,7 +3,7 @@ use crate::export::ExportUi;
 use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Ease, History, KeyRef, Template, Toward, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    Clip, Ease, History, KeyRef, PartMesh, Template, Toward, build_meshes, cell_size, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
     NO_PART, distance_transform, foreground_mask, load_project, project, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -25,6 +25,11 @@ pub const PALETTE: [[u8; 3]; 12] = [
     [60, 180, 150],
     [220, 220, 90],
 ];
+
+/// How the drawing, its parts and the tint overlay are filtered: smooth when
+/// zoomed in, and with mipmaps when zoomed out, so a big drawing shrunk to fit
+/// the window stays smooth instead of jagged.
+const SMOOTH: TextureOptions = TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear));
 
 /// Undo steps kept per drawing.
 const UNDO_LIMIT: usize = 200;
@@ -133,6 +138,9 @@ pub struct Doc {
     /// `sprites_dirty` is set.
     pub sprites: Vec<Sprite>,
     pub sprite_tex: Vec<Option<TextureHandle>>,
+    /// One triangle mesh per part over its sprite, rebuilt with the sprites.
+    /// The canvas draws the character as these, bent by the bones.
+    pub meshes: Vec<PartMesh>,
     pub sprites_dirty: bool,
     /// The original image file, kept byte for byte so projects store it unchanged.
     pub image_bytes: Vec<u8>,
@@ -243,6 +251,8 @@ pub struct AppState {
     pub show_ghost: bool,
     /// Animate step: draw bones and joint dots over the parts (B toggles).
     pub show_bones: bool,
+    /// Rig and Animate: draw the triangle mesh over the character.
+    pub show_mesh: bool,
     /// Part whose row the pointer is on in the Layers list; the canvas lights it up.
     pub highlight_part: Option<usize>,
     /// Skeleton templates: built-in ones, then the user's own.
@@ -291,6 +301,7 @@ impl Default for AppState {
             overlap: 1.0,
             show_ghost: false,
             show_bones: true,
+            show_mesh: false,
             highlight_part: None,
             templates: crate::templates::all(),
             template_choice: 0,
@@ -399,7 +410,7 @@ impl AppState {
             );
             return None;
         }
-        let texture = ctx.load_texture("drawing", to_color_image(&image), TextureOptions::LINEAR);
+        let texture = ctx.load_texture("drawing", to_color_image(&image), SMOOTH);
         let fg = foreground_mask(&image, &self.params);
         let dt = distance_transform(&fg);
         let fg_box = fg.bbox();
@@ -423,6 +434,7 @@ impl AppState {
             motion: Motion::default(),
             sprites: Vec::new(),
             sprite_tex: Vec::new(),
+            meshes: Vec::new(),
             sprites_dirty: true,
             image_bytes: bytes,
             image_ext: ext,
@@ -850,12 +862,13 @@ impl AppState {
         doc.sprites_dirty = false;
         doc.skel_masks = masks_from_labels(&doc.skel_labels, doc.fg.w, doc.fg.h, doc.skeleton.parts.len());
         doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap);
+        doc.meshes = build_meshes(&doc.sprites, cell_size(doc.figure_box()));
         doc.sprite_tex = doc
             .sprites
             .iter()
             .map(|s| {
                 (s.image.width() > 0)
-                    .then(|| ctx.load_texture(format!("part {}", s.part), to_color_image(&s.image), TextureOptions::LINEAR))
+                    .then(|| ctx.load_texture(format!("part {}", s.part), to_color_image(&s.image), SMOOTH))
             })
             .collect();
     }
@@ -928,8 +941,8 @@ impl AppState {
         }
         let color = ColorImage::new([w, h], pixels);
         match &mut doc.overlay {
-            Some(tex) => tex.set(color, TextureOptions::NEAREST),
-            None => doc.overlay = Some(ctx.load_texture("overlay", color, TextureOptions::NEAREST)),
+            Some(tex) => tex.set(color, SMOOTH),
+            None => doc.overlay = Some(ctx.load_texture("overlay", color, SMOOTH)),
         }
     }
 
@@ -1088,6 +1101,7 @@ impl AppState {
         card(ui, "View", |ui| {
             ui.checkbox(&mut self.show_bones, "Show bones").on_hover_text("B: hide them to watch just the animation");
             ui.checkbox(&mut self.show_ghost, "Show original drawing behind");
+            ui.checkbox(&mut self.show_mesh, "Show mesh").on_hover_text("The triangles the drawing bends with");
         });
         self.layers_list(ui);
         fold(ui, "Fine-tune joints", |ui| {
@@ -1263,6 +1277,8 @@ impl AppState {
         {
             doc.overlay_dirty = true;
         }
+        ui.checkbox(&mut self.show_mesh, "Show mesh")
+            .on_hover_text("The triangles each part bends with (updated when you let go of a joint)");
         let Some(doc) = &self.doc else { return };
         if doc.skeleton.parts.is_empty() {
             ui.label(egui::RichText::new("No bones yet. Shift+drag on the drawing to add one.").weak());
@@ -1848,6 +1864,29 @@ mod tests {
         state.open(&egui::Context::default(), &path);
         assert!(state.doc.as_ref().unwrap().skeleton.parts.iter().any(|p| p.name == "near foot"));
         let _ = std::fs::remove_dir_all(crate::paths::app_data_dir());
+    }
+
+    #[test]
+    fn every_part_gets_a_mesh_that_follows_the_pose() {
+        let mut state = open_sample();
+        let ctx = egui::Context::default();
+        state.set_step(Step::Animate);
+        state.refresh_sprites(&ctx);
+        let doc = state.doc.as_ref().unwrap();
+        assert_eq!(doc.meshes.len(), doc.skeleton.parts.len());
+        for (m, s) in doc.meshes.iter().zip(&doc.sprites) {
+            assert_eq!(m.triangles.is_empty(), s.image.width() == 0, "part {}: a mesh exactly when it has pixels", m.part);
+        }
+        // Rigid for now: a posed part's mesh moves exactly with its bone.
+        let arm = doc.meshes.iter().position(|m| !m.triangles.is_empty() && m.part != 1).unwrap();
+        let mut pose = doc.pose.clone();
+        pose.set_angle(arm, 0.6);
+        let t = anim_core::world_transforms(&doc.skeleton, &pose);
+        let m = &doc.meshes[arm];
+        for (moved, p) in m.deform(&t).iter().zip(&m.points) {
+            let want = t[arm].apply(*p);
+            assert!((moved[0] - want[0]).abs() < 1e-3 && (moved[1] - want[1]).abs() < 1e-3);
+        }
     }
 
     #[test]
