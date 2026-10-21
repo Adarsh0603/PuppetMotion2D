@@ -1,7 +1,7 @@
 # PuppetMotion 2D 
 
 
-**Turn a single drawing into a game-ready animation.** Open a picture of a character, place its bones, animate it on a timeline, and export a GIF or a sequence of frames. You don't need layers, rigging knowledge or an art tablet.
+**Turn a single drawing into a game-ready animation.** Open a picture of a character, place its bones, animate it on a timeline, and export a GIF or a sequence of frames.
 
 ![Demo](PuppetMotionDemo.gif)
 
