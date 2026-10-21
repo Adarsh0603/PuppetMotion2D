@@ -61,8 +61,8 @@ The code is split into three crates:
 
 ## Status and plans
 
-This is an early version that's being actively developed. Next up:
-
+This is an early version that's being actively developed. Currently in development:
+- **Auto Rigging and Controlled Animation using AI models:** one click rig generation using AI models, Generate Keyframes for different animation cycles (Walk, Run, Attack etc..)
 - **Layered characters:** import each part as its own image (or a PSD) for clean side-view walk cycles.
 - **Onion skinning**, a **motion library** to reuse walks on any character, **sprite sheets**, and **MP4** export.
 
