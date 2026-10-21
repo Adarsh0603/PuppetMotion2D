@@ -1,10 +1,11 @@
-# PuppetMotion 2D
-<img src="https://github.com/Adarsh0603/PuppetMotion2D/blob/master/app/assets/icon.png?raw=true" alt="Logo" width="120"/>
+# PuppetMotion 2D 
 
 
 **Turn a single drawing into a game-ready animation.** Open a picture of a character, place its bones, animate it on a timeline, and export a GIF or a sequence of frames. You don't need layers, rigging knowledge or an art tablet.
 
 ![Demo](PuppetMotionDemo.gif)
+
+**Watch Full Demo** - [How to Animate a character in PuppetMotion](https://drive.google.com/file/d/1O8VbxdjmwWYcv2nSqimAuaLceeZXnlxI/view?usp=sharing)
 
 **Try on Web** - [PuppetMotion2D Web](https://adarsh0603.github.io/PuppetMotion2D/) 
 
