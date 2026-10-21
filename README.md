@@ -1,5 +1,5 @@
 # PuppetMotion 2D 
-
+A high-performance 2D character animation engine written in Rust.
 
 **Turn a single drawing into a game-ready animation.** Open a picture of a character, place its bones, animate it on a timeline, and export a GIF or a sequence of frames.
 
