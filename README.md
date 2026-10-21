@@ -4,12 +4,18 @@
 
 **Turn a single drawing into a game-ready animation.** Open a picture of a character, place its bones, animate it on a timeline, and export a GIF or a sequence of frames. You don't need layers, rigging knowledge or an art tablet.
 
+![Demo](PuppetMotionDemo.gif)
+
+**Try on Web** - [PuppetMotion2D Web](https://adarsh0603.github.io/PuppetMotion2D/) 
+
+Or **Install for Windows** from [Releases](https://github.com/Adarsh0603/PuppetMotion2D/releases/tag/v0.1.1) section
+
 <!-- Demo GIF goes here once recorded: a drawing going through Review → Rig → Animate → Export.
 ![PuppetMotion 2D: from a drawing to a walk cycle](docs/media/demo.gif)
 -->
 
 
-Free and open source, written in Rust with [egui](https://github.com/emilk/egui).
+Free and open source, written in Rust with egui.
 
 ## How it works
 
