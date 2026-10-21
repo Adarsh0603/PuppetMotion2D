@@ -1,6 +1,8 @@
 # PuppetMotion 2D
+<img src="https://github.com/Adarsh0603/PuppetMotion2D/blob/master/app/assets/icon.png?raw=true" alt="Logo" width="120"/>
 
-**Turn a single drawing into a game-ready animation.** Open a picture of a character, place its bones, pose it on a timeline, and export a GIF or a sequence of frames. You don't need layers, rigging knowledge or an art tablet.
+
+**Turn a single drawing into a game-ready animation.** Open a picture of a character, place its bones, animate it on a timeline, and export a GIF or a sequence of frames. You don't need layers, rigging knowledge or an art tablet.
 
 <!-- Demo GIF goes here once recorded: a drawing going through Review → Rig → Animate → Export.
 ![PuppetMotion 2D: from a drawing to a walk cycle](docs/media/demo.gif)
@@ -29,13 +31,18 @@ Free and open source, written in Rust with [egui](https://github.com/emilk/egui)
 - **Fill behind parts:** guesses what's hidden behind an arm or the head, so moving them shows more body instead of a hole.
 - **Timeline:** keys per bone, Smooth / Linear / Hold easing per key, dragging keys to retime them, frame-rate snapping, and copy / cut / paste of keys, even between projects.
 - **Export:** GIF or PNG frames, cropped to the moving character, at any size and frame rate, with a transparent or coloured background.
-- **Safe to use:** undo / redo, `.pm2d` project files that include the original image, a "Save changes?" prompt, and autosave with crash recovery.
+
 
 ## Download
 
 Get the latest Windows build from the [Releases](https://github.com/Adarsh0603/PuppetMotion2D/releases) page. It's a single `PuppetMotion2D.exe` with nothing to install.
 
-To try it straight away, open `testdata/synthetic_sketch.png`.
+## Current Development Status
+
+This is an early version that's being actively developed. Currently in development:
+- **Auto Rigging and Controlled Animation using AI models:** one click rig generation using AI, Auto generate keyframes for different animation cycles with AI (Walk, Run, Attack etc..) and fine tune them manually.
+- **Layered characters:** import each part as its own image (or a PSD) for clean side-view walk cycles.
+- **Onion skinning**, a **motion library** to reuse walks on any character, **sprite sheets**, and **MP4** export.
 
 ## Build from source
 
@@ -59,12 +66,6 @@ The code is split into three crates:
 | `app/` | The editor window (egui) |
 | `export/` | Renders frames on the CPU and writes GIF and PNG |
 
-## Status and plans
-
-This is an early version that's being actively developed. Currently in development:
-- **Auto Rigging and Controlled Animation using AI models:** one click rig generation using AI models, Generate Keyframes for different animation cycles (Walk, Run, Attack etc..)
-- **Layered characters:** import each part as its own image (or a PSD) for clean side-view walk cycles.
-- **Onion skinning**, a **motion library** to reuse walks on any character, **sprite sheets**, and **MP4** export.
 
 Ideas and bug reports are welcome in [Issues](https://github.com/Adarsh0603/PuppetMotion2D/issues).
 
