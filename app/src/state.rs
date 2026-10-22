@@ -118,6 +118,10 @@ pub struct KeyDrag {
     motion: Motion,
     /// For the undo step recorded when the drag ends.
     before: Option<Snapshot>,
+    /// The timeline's length when the drag began. The rows keep that time
+    /// scale during the drag, so keys dragged past the end make the motion
+    /// longer without the scale shifting under the pointer.
+    pub axis: f32,
 }
 
 /// A loaded drawing and everything derived from it.
@@ -266,6 +270,13 @@ pub struct AppState {
     pub key_sel: Vec<KeyRef>,
     /// Keys being dragged along the timeline, if any.
     pub key_drag: Option<KeyDrag>,
+    /// Shift+drag on a timeline row: (row, time the drag started), selecting
+    /// the keys in between when it ends.
+    pub key_range: Option<(usize, f32)>,
+    /// How far the timeline is zoomed in (1 = the whole motion fits).
+    pub timeline_zoom: f32,
+    /// Sideways scroll to apply to the timeline rows next frame (after a zoom).
+    pub timeline_scroll_to: Option<f32>,
     /// Last copied keys, used if the system clipboard has something else on it.
     pub clip: Option<Clip>,
     /// Selected joint or bone (Rig step).
@@ -339,6 +350,9 @@ impl Default for AppState {
             sampled_at: 0.0,
             key_sel: Vec::new(),
             key_drag: None,
+            key_range: None,
+            timeline_zoom: 1.0,
+            timeline_scroll_to: None,
             clip: None,
             skel_sel: SkelSel::None,
             show_parts: true,
@@ -627,8 +641,13 @@ impl AppState {
         if self.key_sel.is_empty() {
             return;
         }
-        self.key_drag =
-            Some(KeyDrag { grab_t, sel: self.key_sel.clone(), motion: doc.motion.clone(), before: self.snapshot() });
+        self.key_drag = Some(KeyDrag {
+            grab_t,
+            sel: self.key_sel.clone(),
+            motion: doc.motion.clone(),
+            before: self.snapshot(),
+            axis: doc.motion.duration,
+        });
         self.playing = false;
     }
 
@@ -755,6 +774,7 @@ impl AppState {
         self.unkeyed_pose = false;
         self.key_sel.clear();
         self.playing = false;
+        self.timeline_zoom = 1.0;
         self.doc = Some(doc);
         self.skel_sel = SkelSel::None;
         self.drag = Drag::None;
@@ -1706,6 +1726,8 @@ fn step_shortcuts(step: Step) -> &'static [(&'static str, &'static str)] {
             (",  .", "Previous / next frame"),
             ("B", "Show / hide bones"),
             ("Ctrl+A", "Select all keys"),
+            ("Shift+drag row", "Select the keys in that stretch"),
+            ("Ctrl+scroll row", "Zoom the timeline"),
             ("Ctrl+C X V", "Copy / cut / paste keys"),
             ("Delete", "Delete the selected keys"),
             ("Ctrl+Z", "Undo"),

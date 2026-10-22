@@ -1,8 +1,10 @@
 //! The timeline strip shown under the canvas in Pose mode: playback controls,
 //! then one row of keys per animated part (plus an "All keys" summary row and
 //! a "Position" row for whole-figure moves). Click a key to select it,
-//! Shift+click to add to the selection, drag keys to move them in time,
-//! right-click for their ease, click empty space to move the playhead.
+//! Shift+click to add to the selection, Shift+drag over a row to add the keys
+//! in that stretch, drag keys to move them in time (past the end makes the
+//! motion longer), right-click for their ease, click empty space to move the
+//! playhead. Ctrl+scroll zooms in on time; the rows then scroll sideways.
 
 use crate::state::{AppState, part_color};
 use anim_core::motion::{KEY_EPSILON, MAX_FPS};
@@ -16,6 +18,10 @@ const ROW_HEIGHT: f32 = 20.0;
 const MIN_ROW_WIDTH: f32 = 640.0;
 /// How close (points) a click must be to a key's diamond to pick it.
 const KEY_HIT: f32 = 6.0;
+/// Space (points) between the row's label and the first key, and after the last.
+const KEY_MARGIN: f32 = 8.0;
+/// Furthest the timeline zooms in.
+const MAX_ZOOM: f32 = 20.0;
 
 /// One row of the timeline.
 enum Lane {
@@ -37,13 +43,45 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let lanes = lanes(state);
     // Rows keep a usable width on a small window and scroll both ways, with
     // thin scroll bars drawn over the rows so they take no room of their own.
+    // Zoomed in, they're wider than the window by the zoom.
     ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
-    egui::ScrollArea::both().id_salt("timeline rows").auto_shrink([false, false]).show(ui, |ui| {
+    let base = ui.available_width().max(MIN_ROW_WIDTH);
+    let width = base * state.timeline_zoom;
+    let mut area = egui::ScrollArea::both().id_salt("timeline rows").auto_shrink([false, false]);
+    if let Some(x) = state.timeline_scroll_to.take() {
+        area = area.horizontal_scroll_offset(x);
+    }
+    let out = area.show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         for (i, lane) in lanes.iter().enumerate() {
-            lane_row(ui, state, lane, i);
+            lane_row(ui, state, lane, i, width);
         }
     });
+    zoom(ui, state, out.inner_rect, out.state.clamped_offset().x, base);
+}
+
+/// The key area of a row `width` wide, in row coordinates: where time 0 sits and how wide the whole length is.
+fn key_span(width: f32) -> (f32, f32) {
+    (LABEL_WIDTH + KEY_MARGIN, (width - LABEL_WIDTH - 2.0 * KEY_MARGIN).max(1.0))
+}
+
+/// Ctrl+scroll over the rows zooms the time scale, keeping the moment under
+/// the pointer where it is. `view` is the rows' visible area, `scrolled` how
+/// far they're scrolled sideways, `base` a row's width at zoom 1.
+fn zoom(ui: &egui::Ui, state: &mut AppState, view: Rect, scrolled: f32, base: f32) {
+    let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| view.contains(*p)) else { return };
+    let factor = ui.input(|i| i.zoom_delta());
+    let (old, new) = (state.timeline_zoom, (state.timeline_zoom * factor).clamp(1.0, MAX_ZOOM));
+    if factor == 1.0 || new == old {
+        return;
+    }
+    // The pointer's place along the length, before and after.
+    let x = p.x - view.left() + scrolled;
+    let ((left, before), (_, after)) = (key_span(base * old), key_span(base * new));
+    let share = (x - left) / before;
+    state.timeline_zoom = new;
+    state.timeline_scroll_to = Some((left + share * after - (p.x - view.left())).max(0.0));
+    ui.ctx().request_repaint();
 }
 
 /// The bar above the rows: playback, keys, clipboard, ease, length and fps.
@@ -114,6 +152,11 @@ fn controls(ui: &mut egui::Ui, state: &mut AppState, duration: f32, selected: us
         length_editor(ui, state);
         fps_editor(ui, state);
         ui.checkbox(&mut state.looping, "Loop");
+        // Only there when zoomed in (Ctrl+scroll over the rows).
+        if state.timeline_zoom > 1.0 && ui.button("Fit").on_hover_text("Show the whole motion again").clicked() {
+            state.timeline_zoom = 1.0;
+            state.timeline_scroll_to = Some(0.0);
+        }
     });
 }
 
@@ -165,9 +208,11 @@ fn is_selected(sel: &[KeyRef], r: &KeyRef) -> bool {
     sel.iter().any(|s| s.track == r.track && (s.t - r.t).abs() < KEY_EPSILON)
 }
 
-fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
+fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize, width: f32) {
     let doc = state.doc.as_ref().unwrap();
-    let duration = doc.motion.duration.max(0.01);
+    // While keys are dragged the time scale stays as it was, so dragging past
+    // the end lengthens the motion instead of squeezing the rows.
+    let duration = state.key_drag.as_ref().map_or(doc.motion.duration, |d| d.axis).max(0.01);
     // Each key time with the keys a click there picks, and their shared ease (None if mixed).
     let keys: Vec<(f32, Vec<KeyRef>, Option<Ease>)> = lane_keys(&doc.motion, lane)
         .into_iter()
@@ -179,16 +224,15 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
         })
         .collect();
     let height = if matches!(lane, Lane::All) { SUMMARY_HEIGHT } else { ROW_HEIGHT };
-    // Never narrower than MIN_ROW_WIDTH, so keys don't crowd together on a small
-    // window; the rows scroll sideways instead.
-    let width = ui.available_width().max(MIN_ROW_WIDTH);
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    let label_rect = Rect::from_min_size(rect.min, vec2(LABEL_WIDTH, height));
+    // The label stays at the visible left edge when the rows are scrolled sideways.
+    let label_left = rect.left().max(ui.clip_rect().left());
+    let label_rect = Rect::from_min_size(pos2(label_left, rect.top()), vec2(LABEL_WIDTH, height));
     let bar = Rect::from_min_max(pos2(rect.left() + LABEL_WIDTH, rect.top()), rect.max);
-    let inner = bar.shrink2(vec2(8.0, 0.0));
-    let x_of = |t: f32| inner.left() + inner.width() * (t / duration).clamp(0.0, 1.0);
-    let t_of = |x: f32| ((x - inner.left()) / inner.width()).clamp(0.0, 1.0) * duration;
+    let (start, span) = key_span(width);
+    let x_of = |t: f32| rect.left() + start + span * t / duration;
+    let t_of = |x: f32| ((x - rect.left() - start) / span * duration).max(0.0);
     let (fps, length) = (doc.motion.fps.max(1) as f32, doc.motion.duration);
     let snap = |t: f32| ((t * fps).round() / fps).min(length);
 
@@ -198,19 +242,11 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
         Lane::Position => ("Position".to_string(), Color32::LIGHT_GRAY),
         Lane::Part(i, name) => (name.clone(), part_color(*i)),
     };
-    painter.rect_filled(label_rect, 0.0, Color32::from_gray(30));
-    painter.text(
-        label_rect.left_center() + vec2(6.0, 0.0),
-        egui::Align2::LEFT_CENTER,
-        name,
-        egui::FontId::proportional(13.0),
-        color,
-    );
     let shade = if row.is_multiple_of(2) { 38 } else { 33 };
     painter.rect_filled(bar, 0.0, Color32::from_gray(shade));
     // Frame ticks, when they're far enough apart to read.
     let frames = doc.motion.frame_at(duration);
-    if frames > 0 && inner.width() / frames as f32 >= 6.0 {
+    if frames > 0 && span / frames as f32 >= 6.0 {
         for f in 0..=frames {
             let x = x_of(f as f32 * doc.motion.frame_len());
             painter.line_segment([pos2(x, bar.bottom() - 4.0), pos2(x, bar.bottom())], Stroke::new(1.0, Color32::from_gray(60)));
@@ -238,13 +274,32 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     // Playhead.
     let x = x_of(state.playhead);
     painter.line_segment([pos2(x, bar.top()), pos2(x, bar.bottom())], Stroke::new(2.0, Color32::from_rgb(90, 190, 255)));
+    // Shift+drag in progress on this row: the stretch it will select.
+    let pointer = response.interact_pointer_pos().or(response.hover_pos());
+    if let (Some((r, t0)), Some(p)) = (state.key_range, pointer)
+        && r == row
+    {
+        let (a, b) = (x_of(t0), x_of(t_of(p.x).min(length)));
+        let band = Rect::from_x_y_ranges(a.min(b)..=a.max(b), bar.y_range());
+        painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(120, 180, 255, 50));
+    }
+
+    // Label on top, so keys scrolled under it are hidden.
+    painter.rect_filled(label_rect, 0.0, Color32::from_gray(30));
+    painter.text(
+        label_rect.left_center() + vec2(6.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::proportional(13.0),
+        color,
+    );
 
     // Pointer: click a key to select it (Shift adds), drag keys to retime
     // them, right-click a key to pick its ease; click or drag empty space to
-    // move the playhead.
+    // move the playhead, Shift+drag to select the keys in a stretch.
     let shift = ui.input(|i| i.modifiers.shift);
     let hit_at = |p: Pos2| -> Option<(f32, Vec<KeyRef>)> {
-        if !bar.contains(p) {
+        if !bar.contains(p) || p.x < label_rect.right() {
             return None;
         }
         keys.iter()
@@ -256,6 +311,7 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     if response.clicked()
         && let Some(p) = response.interact_pointer_pos()
         && bar.contains(p)
+        && p.x >= label_rect.right()
     {
         match hit_at(p) {
             Some((t, refs)) => {
@@ -281,14 +337,17 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
         if let Some((t, refs)) = origin.and_then(hit_at) {
             pick_keys(state, &refs, shift);
             state.begin_key_drag(t);
+        } else if let (true, Some(o)) = (shift, origin) {
+            state.key_range = Some((row, t_of(o.x).min(length)));
         }
     }
+    let ranging = state.key_range.is_some_and(|(r, _)| r == row);
     if response.dragged()
         && let Some(p) = response.interact_pointer_pos()
     {
         if state.key_drag.is_some() {
             state.update_key_drag(t_of(p.x));
-        } else {
+        } else if !ranging {
             // Dragging empty space scrubs, frame by frame.
             state.playhead = snap(t_of(p.x));
             state.playing = false;
@@ -296,6 +355,18 @@ fn lane_row(ui: &mut egui::Ui, state: &mut AppState, lane: &Lane, row: usize) {
     }
     if response.drag_stopped() {
         state.end_key_drag();
+        let release = response.interact_pointer_pos().or(ui.input(|i| i.pointer.latest_pos()));
+        if let (true, Some((_, t0)), Some(p)) = (ranging, state.key_range.take(), release) {
+            // Add every key in the stretch to the selection.
+            let t1 = t_of(p.x).min(length);
+            let (lo, hi) = (t0.min(t1) - KEY_EPSILON, t0.max(t1) + KEY_EPSILON);
+            for (t, refs, _) in &keys {
+                if (lo..=hi).contains(t) {
+                    let new: Vec<KeyRef> = refs.iter().filter(|r| !is_selected(&state.key_sel, r)).cloned().collect();
+                    state.key_sel.extend(new);
+                }
+            }
+        }
     }
 
     if response.secondary_clicked()
