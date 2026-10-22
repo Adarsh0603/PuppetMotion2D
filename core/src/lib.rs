@@ -25,7 +25,7 @@ pub use geom::RectI;
 pub use history::History;
 pub use layers::{Layer, Layers};
 pub use mask::Mask;
-pub use mesh::{PartMesh, build_meshes, cell_size, smooth_weights};
+pub use mesh::{PartMesh, build_meshes, cell_size, smooth_weights, smooth_weights_with};
 pub use motion::{Clip, Ease, Key, KeyRef, Motion, TrackId};
 pub use project::{LoadedProject, ProjectData, load_project, project_from_bytes, project_to_bytes, save_project};
 pub use rig::{

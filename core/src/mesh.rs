@@ -120,6 +120,20 @@ const MIN_JOINT_THICKNESS: f32 = 3.0;
 /// belongs to, so where two parts meet (their grid points coincide) both
 /// sides move together and the seam stays closed.
 pub fn smooth_weights(meshes: &mut [PartMesh], skel: &crate::skeleton::Skeleton, dt: &[f32], w: usize, softness: f32) {
+    smooth_weights_with(meshes, skel, dt, w, softness, |_, _| true);
+}
+
+/// `smooth_weights`, blending a mesh only with the bones `blend(mesh index,
+/// bone)` allows. A layered drawing bends within each layer, not across
+/// layers: the body layer doesn't stretch when the leg layer swings.
+pub fn smooth_weights_with(
+    meshes: &mut [PartMesh],
+    skel: &crate::skeleton::Skeleton,
+    dt: &[f32],
+    w: usize,
+    softness: f32,
+    blend: impl Fn(usize, usize) -> bool,
+) {
     // Every parent → child joint: where it is, how thick the drawing is there,
     // and which way the child points.
     struct Joint {
@@ -151,7 +165,7 @@ pub fn smooth_weights(meshes: &mut [PartMesh], skel: &crate::skeleton::Skeleton,
             })
         })
         .collect();
-    for mesh in meshes.iter_mut() {
+    for (mi, mesh) in meshes.iter_mut().enumerate() {
         for (p, weights) in mesh.points.iter().zip(mesh.weights.iter_mut()) {
             *weights = vec![(mesh.part, 1.0)];
             if softness <= 0.0 {
@@ -164,6 +178,7 @@ pub fn smooth_weights(meshes: &mut [PartMesh], skel: &crate::skeleton::Skeleton,
             let near = joints
                 .iter()
                 .filter(|j| j.parent == mesh.part || j.child == mesh.part)
+                .filter(|j| blend(mi, if j.parent == mesh.part { j.child } else { j.parent }))
                 .map(|j| {
                     let d = ((p[0] - j.at[0]).powi(2) + (p[1] - j.at[1]).powi(2)).sqrt();
                     let (a, b) = skel.bone(j.child);

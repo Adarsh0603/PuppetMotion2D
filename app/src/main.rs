@@ -4,6 +4,7 @@
 
 mod canvas;
 mod export;
+mod layers;
 mod panel;
 mod paths;
 mod platform;
@@ -180,16 +181,27 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        // A dropped file: on desktop it's read from its path; in the browser
-        // it's read asynchronously and arrives with the picked files below.
-        if let Some(file) = ctx.input(|i| i.raw.dropped_files.first().cloned()) {
+        // Dropped files: on desktop they're read from their paths; in the
+        // browser they're read asynchronously and arrive with the picked files
+        // below. Several at once are the layers of one drawing.
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped.is_empty() {
             #[cfg(not(target_arch = "wasm32"))]
-            self.state.request_open(&ctx, file.path());
+            {
+                let paths: Vec<std::path::PathBuf> = dropped.iter().map(|f| f.path().to_path_buf()).collect();
+                self.state.request_open_paths(&ctx, &paths);
+            }
             #[cfg(target_arch = "wasm32")]
-            platform::read_dropped(&ctx, file);
+            platform::read_dropped(&ctx, dropped);
         }
-        for picked in platform::take_picked() {
-            self.state.request_open_bytes(&ctx, picked.name, picked.bytes);
+        for batch in platform::take_picked() {
+            let mut files: Vec<(String, Vec<u8>)> = batch.into_iter().map(|p| (p.name, p.bytes)).collect();
+            if files.len() == 1 {
+                let (name, bytes) = files.remove(0);
+                self.state.request_open_bytes(&ctx, name, bytes);
+            } else {
+                self.state.request_open_files(&ctx, files);
+            }
         }
         self.shortcuts(&ctx);
         self.state.tick(&ctx);

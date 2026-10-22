@@ -6,41 +6,49 @@ use std::cell::RefCell;
 use wasm_bindgen::JsCast;
 
 thread_local! {
-    /// Files the browser's picker has handed over, waiting for the app.
-    static PICKED: RefCell<Vec<Picked>> = const { RefCell::new(Vec::new()) };
+    /// Files the browser's picker has handed over, waiting for the app: one
+    /// list per pick or drop.
+    static PICKED: RefCell<Vec<Vec<Picked>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Show the browser's file picker for a drawing or a project. The browser
-/// answers later; the file arrives through `take_picked`.
+/// Show the browser's file picker for a drawing, a project, or several layer
+/// images. The browser answers later; the files arrive through `take_picked`.
 pub fn pick_file(ctx: &egui::Context) {
     let ctx = ctx.clone();
     wasm_bindgen_futures::spawn_local(async move {
         let mut all: Vec<&str> = IMAGE_TYPES.to_vec();
         all.push(anim_core::project::EXTENSION);
-        let Some(file) = rfd::AsyncFileDialog::new().add_filter("Drawings and projects", &all).pick_file().await else {
+        let Some(files) = rfd::AsyncFileDialog::new().add_filter("Drawings and projects", &all).pick_files().await else {
             return;
         };
-        let bytes = file.read().await;
-        PICKED.with(|p| p.borrow_mut().push(Picked { name: file.file_name(), bytes }));
+        let mut batch = Vec::with_capacity(files.len());
+        for file in files {
+            batch.push(Picked { name: file.file_name(), bytes: file.read().await });
+        }
+        PICKED.with(|p| p.borrow_mut().push(batch));
         ctx.request_repaint();
     });
 }
 
-/// A file dropped on the page: the browser reads it later; it arrives
-/// through `take_picked` like a picked one.
-pub fn read_dropped(ctx: &egui::Context, file: egui::DroppedFileHandle) {
+/// Files dropped on the page: the browser reads them later; they arrive
+/// together through `take_picked`, like picked ones.
+pub fn read_dropped(ctx: &egui::Context, files: Vec<egui::DroppedFileHandle>) {
     let ctx = ctx.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        let name = file.path().to_string_lossy().into_owned();
-        if let Ok(bytes) = file.bytes_async().await {
-            PICKED.with(|p| p.borrow_mut().push(Picked { name, bytes }));
-            ctx.request_repaint();
+        let mut batch = Vec::with_capacity(files.len());
+        for file in files {
+            let name = file.path().to_string_lossy().into_owned();
+            if let Ok(bytes) = file.bytes_async().await {
+                batch.push(Picked { name, bytes });
+            }
         }
+        PICKED.with(|p| p.borrow_mut().push(batch));
+        ctx.request_repaint();
     });
 }
 
-/// Files picked since the last call.
-pub fn take_picked() -> Vec<Picked> {
+/// Files picked or dropped since the last call, one list per pick or drop.
+pub fn take_picked() -> Vec<Vec<Picked>> {
     PICKED.with(|p| std::mem::take(&mut *p.borrow_mut()))
 }
 

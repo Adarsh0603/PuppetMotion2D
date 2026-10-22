@@ -29,6 +29,8 @@ pub enum Pending {
     Open(PathBuf),
     /// A file given by contents (dropped in the browser, or picked there).
     OpenBytes(String, Vec<u8>),
+    /// Several files (name, contents), opened as the layers of one drawing.
+    OpenFiles(Vec<(String, Vec<u8>)>),
 }
 
 /// A recovery copy found at startup.
@@ -113,7 +115,7 @@ pub fn autosave_now(state: &mut AppState) {
     }
     let u = &mut state.unsaved;
     let written = std::fs::create_dir_all(&u.dir)
-        .and_then(|()| save_project(&u.file(), &data, &doc.image_bytes, &doc.image_ext))
+        .and_then(|()| save_project(&u.file(), &data, &doc.image_bytes, &doc.image_ext, doc.layer_pngs()))
         .and_then(|()| {
             let original = doc.project_path.as_deref().map(Path::to_string_lossy).unwrap_or_default();
             std::fs::write(u.dir.join(RECOVERY_INFO), format!("{}\n{original}\n", doc.name))
@@ -146,7 +148,7 @@ pub fn show_prompt(ctx: &egui::Context, state: &mut AppState) {
     let name = state.doc.as_ref().map_or_else(String::new, |d| d.name.clone());
     let action = match pending {
         Pending::Close => "before closing",
-        Pending::OpenDialog | Pending::Open(_) | Pending::OpenBytes(..) => "before opening another file",
+        Pending::OpenDialog | Pending::Open(_) | Pending::OpenBytes(..) | Pending::OpenFiles(_) => "before opening another file",
     };
     let mut choice = None;
     let modal = egui::Modal::new(egui::Id::unique("save prompt")).show(ctx, |ui| {
@@ -205,6 +207,7 @@ fn proceed(ctx: &egui::Context, state: &mut AppState, pending: Pending) {
         Pending::OpenDialog => state.open_dialog(ctx),
         Pending::Open(path) => state.open(ctx, &path),
         Pending::OpenBytes(name, bytes) => state.open_bytes(ctx, &name, bytes, None),
+        Pending::OpenFiles(files) => state.open_files(ctx, files),
     }
 }
 

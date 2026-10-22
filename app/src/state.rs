@@ -1,9 +1,10 @@
 use crate::canvas::{Drag, View};
 use crate::export::ExportUi;
+use crate::layers::DocLayers;
 use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, in_paint_order,
+    Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, smooth_weights_with, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, in_paint_order,
     NO_PART, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -107,6 +108,8 @@ pub struct Snapshot {
     pub pose: Pose,
     pub motion: Motion,
     pub paint: WeightPaint,
+    /// Bones chosen by hand for each drawing layer (empty without layers).
+    pub layer_bones: Vec<Vec<String>>,
 }
 
 /// Keys being dragged along the timeline.
@@ -169,6 +172,9 @@ pub struct Doc {
     pub project_path: Option<PathBuf>,
     /// Changes since the last save (or since opening).
     pub dirty: bool,
+    /// The drawing's layers, when it was opened as several images (None for one drawing).
+    /// `image` is then all of them stacked, and `fg` everything they cover.
+    pub layers: Option<DocLayers>,
 }
 
 impl Doc {
@@ -178,23 +184,41 @@ impl Doc {
             pose: self.pose.clone(),
             motion: self.motion.clone(),
             paint: self.paint.clone(),
+            layer_bones: self.layers.as_ref().map_or(Vec::new(), |l| l.chosen.clone()),
         }
     }
 
-    /// Put back a snapshot's skeleton, pose, motion and painted weights (masks
-    /// are recomputed by the caller).
+    /// Put back a snapshot's skeleton, pose, motion, painted weights and
+    /// layer bones (masks are recomputed by the caller).
     fn restore(&mut self, s: Snapshot) {
         self.skeleton = s.skeleton;
         self.pose = s.pose;
         self.motion = s.motion;
         self.paint = s.paint;
+        if let Some(l) = &mut self.layers
+            && s.layer_bones.len() == l.chosen.len()
+        {
+            l.chosen = s.layer_bones;
+        }
+    }
+
+    /// Each layer's PNG, for saving (none for a single drawing).
+    pub fn layer_pngs(&self) -> &[Vec<u8>] {
+        self.layers.as_ref().map_or(&[], |l| &l.pngs)
     }
 
     /// Work out every mesh point's bone weights: the automatic blend at the
     /// joints (`softness`), then the painted changes. Quick, so a brush
     /// stroke can redo it every frame.
     pub fn update_weights(&mut self, softness: f32) {
-        smooth_weights(&mut self.meshes, &self.skeleton, &self.dt, self.fg.w as usize, softness);
+        let w = self.fg.w as usize;
+        match &self.layers {
+            // A piece bends only with the bones of its own layer.
+            Some(l) => smooth_weights_with(&mut self.meshes, &self.skeleton, &self.dt, w, softness, |m, bone| {
+                l.piece_layer.get(m).and_then(|&layer| l.bones.get(layer)).is_some_and(|b| b.contains(&bone))
+            }),
+            None => smooth_weights(&mut self.meshes, &self.skeleton, &self.dt, w, softness),
+        }
         apply_paint(&mut self.meshes, &self.skeleton, &self.paint);
     }
 
@@ -212,7 +236,16 @@ impl Doc {
     /// changed. Runs every frame of a joint drag, so it only updates the
     /// part map; the per-part masks are built when the sprites need them.
     pub fn recompute_skeleton(&mut self) {
-        part_labels(&self.fg, &self.dt, self.fg_box, &self.skeleton, &mut self.skel_labels);
+        match &mut self.layers {
+            // Each layer split along its own bones; the top layer shows.
+            Some(l) => {
+                l.bones = l.set.bones(&self.skeleton, &l.chosen);
+                l.set.labels(&self.skeleton, &l.bones, &mut self.skel_labels);
+            }
+            None => {
+                part_labels(&self.fg, &self.dt, self.fg_box, &self.skeleton, &mut self.skel_labels);
+            }
+        }
         self.overlay_dirty = true;
         self.sprites_dirty = true;
     }
@@ -432,8 +465,34 @@ impl AppState {
         self.overlap = data.overlap;
         self.softness = data.softness;
         self.fill_behind = data.fill_behind;
-        let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext) else { return };
-        doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion, paint: data.weight_paint });
+        let doc = if data.layers.is_empty() {
+            self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext)
+        } else {
+            // A layered project: rebuild the stack from its layer images.
+            let decoded = data
+                .layers
+                .iter()
+                .zip(&loaded.layer_pngs)
+                .map(|(info, png)| {
+                    let image = image::load_from_memory(png).map_err(|e| format!("layer \"{}\": {e}", info.name))?.to_rgba8();
+                    Ok(anim_core::Layer { name: info.name.clone(), image })
+                })
+                .collect::<Result<Vec<_>, String>>();
+            let chosen = data.layers.iter().map(|l| l.bones.clone()).collect();
+            match decoded.and_then(|layers| DocLayers::new(layers, chosen)) {
+                Ok(layers) => {
+                    let image = layers.set.composite();
+                    self.make_doc(ctx, &data.image_name, image, Some(layers), loaded.image_bytes, loaded.image_ext)
+                }
+                Err(e) => {
+                    self.status = format!("Could not open {name}: {e}");
+                    return;
+                }
+            }
+        };
+        let Some(mut doc) = doc else { return };
+        let layer_bones = doc.layers.as_ref().map_or(Vec::new(), |l| l.chosen.clone());
+        doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion, paint: data.weight_paint, layer_bones });
         doc.recompute_skeleton();
         doc.project_path = path.map(Path::to_path_buf);
         self.status = format!("Opened project {name}");
@@ -474,6 +533,21 @@ impl AppState {
                 return None;
             }
         };
+        self.make_doc(ctx, name, image, None, bytes, ext)
+    }
+
+    /// Build a fresh document for `image` (empty skeleton). The character is
+    /// found with the cutout, unless `layers` are given: then `image` is them
+    /// stacked and the character is everything they cover.
+    fn make_doc(
+        &mut self,
+        ctx: &egui::Context,
+        name: &str,
+        image: RgbaImage,
+        layers: Option<DocLayers>,
+        bytes: Vec<u8>,
+        ext: String,
+    ) -> Option<Doc> {
         let max_side = ctx.input(|i| i.max_texture_side) as u32;
         if image.width() > max_side || image.height() > max_side {
             self.status = format!(
@@ -484,10 +558,16 @@ impl AppState {
             return None;
         }
         let texture = ctx.load_texture("drawing", to_color_image(&image), SMOOTH);
-        let fg = foreground_mask(&image, &self.params);
+        let fg = match &layers {
+            Some(l) => l.set.mask(),
+            None => foreground_mask(&image, &self.params),
+        };
         let dt = distance_transform(&fg);
         let fg_box = fg.bbox();
-        self.status = format!("Opened {name} ({}×{})", image.width(), image.height());
+        self.status = match &layers {
+            Some(l) => format!("Opened {name}: {} layers ({}×{})", l.set.layers.len(), image.width(), image.height()),
+            None => format!("Opened {name} ({}×{})", image.width(), image.height()),
+        };
         let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy().into_owned();
         Some(Doc {
             image,
@@ -515,7 +595,97 @@ impl AppState {
             image_ext: ext,
             project_path: None,
             dirty: false,
+            layers,
         })
+    }
+
+    /// Open several image files as one character's layers, ordered by file
+    /// name (bottom to top; Review can reorder them).
+    fn open_layers(&mut self, ctx: &egui::Context, files: Vec<(String, Vec<u8>)>) {
+        let built = crate::layers::decode(files).and_then(|layers| {
+            let name = crate::layers::shared_name(&layers);
+            let doc_layers = DocLayers::new(layers, Vec::new())?;
+            let image = doc_layers.set.composite();
+            let bytes = crate::layers::png_bytes(&image)?;
+            Ok((name, doc_layers, image, bytes))
+        });
+        let (name, doc_layers, image, bytes) = match built {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Could not open the layers: {e}");
+                return;
+            }
+        };
+        let Some(mut doc) = self.make_doc(ctx, &format!("{name}.png"), image, Some(doc_layers), bytes, "png".into()) else { return };
+        self.softness = DEFAULT_SOFTNESS;
+        if let Some(t) = self.templates.get(self.template_choice).or(self.templates.first()) {
+            doc.fit_skeleton(&self.facing(t));
+        }
+        self.set_doc(doc);
+        // Review first, to check the layer order.
+        self.set_step(Step::Review);
+    }
+
+    /// Open picked or dropped files: one is a drawing or a project, several
+    /// are the layers of one character.
+    pub fn open_files(&mut self, ctx: &egui::Context, files: Vec<(String, Vec<u8>)>) {
+        match files.len() {
+            0 => {}
+            1 => {
+                let (name, bytes) = files.into_iter().next().unwrap();
+                self.open_bytes(ctx, &name, bytes, None);
+            }
+            _ if files.iter().any(|(n, _)| n.to_ascii_lowercase().ends_with(&format!(".{}", project::EXTENSION))) => {
+                self.status = "Open one project at a time; several files are opened as the layers of one drawing.".into();
+            }
+            _ => self.open_layers(ctx, files),
+        }
+    }
+
+    /// `open_files`, first asking to save if the current drawing has unsaved changes.
+    pub fn request_open_files(&mut self, ctx: &egui::Context, files: Vec<(String, Vec<u8>)>) {
+        if self.doc.as_ref().is_some_and(|d| d.dirty) {
+            self.unsaved.prompt = Some(Pending::OpenFiles(files));
+        } else {
+            self.open_files(ctx, files);
+        }
+    }
+
+    /// Put the layers in a new order (`order` lists old positions, bottom to
+    /// top) and rebuild the stacked drawing. Not an undo step: it's part of
+    /// checking the import.
+    pub fn reorder_layers(&mut self, ctx: &egui::Context, order: &[usize]) {
+        let Some(doc) = &mut self.doc else { return };
+        let Some(old) = &doc.layers else { return };
+        let built = old.reordered(order).and_then(|l| {
+            let image = l.set.composite();
+            let bytes = crate::layers::png_bytes(&image)?;
+            Ok((l, image, bytes))
+        });
+        let (layers, image, bytes) = match built {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Could not reorder the layers: {e}");
+                return;
+            }
+        };
+        doc.texture = ctx.load_texture("drawing", to_color_image(&image), SMOOTH);
+        doc.image = image;
+        doc.image_bytes = bytes;
+        doc.layers = Some(layers);
+        doc.recompute_skeleton();
+        doc.dirty = true;
+    }
+
+    /// Set the bones drawing layer `l` moves with (by name; empty = guess), as one undo step.
+    pub fn choose_layer_bones(&mut self, l: usize, bones: Vec<String>) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        let Some(layers) = &mut doc.layers else { return };
+        let Some(slot) = layers.chosen.get_mut(l) else { return };
+        *slot = bones;
+        doc.recompute_skeleton();
+        self.commit(before);
     }
 
     /// Advance playback by this frame's time and keep the shown pose in step
@@ -798,7 +968,7 @@ impl AppState {
         let Some(data) = self.project_data() else { return };
         let Some(doc) = &mut self.doc else { return };
         let file = format!("{}.{}", doc.name, project::EXTENSION);
-        self.status = match anim_core::project_to_bytes(&data, &doc.image_bytes, &doc.image_ext) {
+        self.status = match anim_core::project_to_bytes(&data, &doc.image_bytes, &doc.image_ext, doc.layer_pngs()) {
             Ok(bytes) => {
                 crate::platform::download(&file, &bytes, "application/zip");
                 doc.dirty = false;
@@ -828,8 +998,18 @@ impl AppState {
     /// What a saved project holds for the open drawing.
     pub fn project_data(&self) -> Option<ProjectData> {
         let doc = self.doc.as_ref()?;
+        let layers: Vec<project::LayerInfo> = doc.layers.as_ref().map_or(Vec::new(), |l| {
+            l.set
+                .layers
+                .iter()
+                .zip(&l.chosen)
+                .enumerate()
+                .map(|(i, (layer, bones))| project::LayerInfo { name: layer.name.clone(), file: project::layer_file(i), bones: bones.clone() })
+                .collect()
+        });
         Some(ProjectData {
-            format_version: project::FORMAT_VERSION,
+            format_version: project::format_for(!layers.is_empty()),
+            layers,
             image_name: format!("{}.{}", doc.name, doc.image_ext),
             params: self.params,
             skeleton: doc.skeleton.clone(),
@@ -845,7 +1025,7 @@ impl AppState {
     pub fn save_to(&mut self, path: &Path) {
         let Some(data) = self.project_data() else { return };
         let Some(doc) = &mut self.doc else { return };
-        self.status = match save_project(path, &data, &doc.image_bytes, &doc.image_ext) {
+        self.status = match save_project(path, &data, &doc.image_bytes, &doc.image_ext, doc.layer_pngs()) {
             Ok(()) => {
                 doc.project_path = Some(path.to_path_buf());
                 doc.dirty = false;
@@ -864,6 +1044,25 @@ impl AppState {
             self.unsaved.prompt = Some(Pending::Open(path.to_path_buf()));
         } else {
             self.open(ctx, path);
+        }
+    }
+
+    /// Open dropped files from disk (`open_paths`), first asking to save if
+    /// the current drawing has unsaved changes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn request_open_paths(&mut self, ctx: &egui::Context, paths: &[PathBuf]) {
+        if let [one] = paths {
+            self.request_open(ctx, one);
+            return;
+        }
+        if self.doc.as_ref().is_some_and(|d| d.dirty) {
+            let files = paths
+                .iter()
+                .filter_map(|p| Some((p.file_name()?.to_string_lossy().into_owned(), std::fs::read(p).ok()?)))
+                .collect();
+            self.unsaved.prompt = Some(Pending::OpenFiles(files));
+        } else {
+            self.open_paths(ctx, paths);
         }
     }
 
@@ -897,14 +1096,38 @@ impl AppState {
     pub fn open_dialog(&mut self, ctx: &egui::Context) {
         let images = crate::platform::IMAGE_TYPES;
         let all: Vec<&str> = images.iter().copied().chain([project::EXTENSION]).collect();
-        if let Some(path) = rfd::FileDialog::new()
+        // Several images at once are the layers of one character.
+        let Some(paths) = rfd::FileDialog::new()
+            .set_title("Open a drawing, a project, or several layer images")
             .add_filter("Images and projects", &all)
             .add_filter("PuppetMotion project", &[project::EXTENSION])
             .add_filter("Images", &images)
-            .pick_file()
-        {
-            self.open(ctx, &path);
+            .pick_files()
+        else {
+            return;
+        };
+        self.open_paths(ctx, &paths);
+    }
+
+    /// Open files from disk: one by its path (so a project saves back there),
+    /// several as the layers of one drawing.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_paths(&mut self, ctx: &egui::Context, paths: &[PathBuf]) {
+        if let [one] = paths {
+            self.open(ctx, one);
+            return;
         }
+        let mut files = Vec::with_capacity(paths.len());
+        for p in paths {
+            match std::fs::read(p) {
+                Ok(bytes) => files.push((p.file_name().unwrap_or_default().to_string_lossy().into_owned(), bytes)),
+                Err(e) => {
+                    self.status = format!("Could not open {}: {e}", p.display());
+                    return;
+                }
+            }
+        }
+        self.open_files(ctx, files);
     }
 
     /// Window title: app name, drawing name, and a * when there are unsaved changes.
@@ -1001,8 +1224,19 @@ impl AppState {
         doc.sprites_dirty = false;
         doc.skel_masks = masks_from_labels(&doc.skel_labels, doc.fg.w, doc.fg.h, doc.skeleton.parts.len());
         // The pieces, back to front; the canvas and export draw them in this order.
-        let sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap, self.fill_behind);
-        doc.sprites = in_paint_order(sprites, &doc.skeleton);
+        doc.sprites = match &mut doc.layers {
+            // Every layer cut along its own bones, in the layers' order.
+            Some(l) => {
+                let (pieces, from) = l.set.pieces(&doc.skeleton, &l.bones, self.overlap);
+                l.piece_layer = from;
+                pieces
+            }
+            None => {
+                let sprites =
+                    build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap, self.fill_behind);
+                in_paint_order(sprites, &doc.skeleton)
+            }
+        };
         doc.meshes = build_meshes(&doc.sprites, cell_size(doc.figure_box()));
         doc.update_weights(self.softness);
         doc.sprite_tex = doc
@@ -1208,16 +1442,25 @@ impl AppState {
             });
             return;
         };
-        let (name, w, h) = (doc.name.clone(), doc.image.width(), doc.image.height());
+        let (name, w, h, layered) = (doc.name.clone(), doc.image.width(), doc.image.height(), doc.layers.is_some());
         card(ui, "Drawing", |ui| {
             ui.label(egui::RichText::new(&name).strong());
             ui.label(egui::RichText::new(format!("{w} × {h} px")).weak());
+            if layered {
+                ui.label("Opened as layers, one image per part. Their see-through areas are the background.");
+                return;
+            }
             ui.label("Your character stays bright and the background is dimmed.");
             ui.label(
                 egui::RichText::new("If some background is included, or part of the character is dimmed, fine-tune the cutout.")
                     .weak(),
             );
         });
+        // Layers need no cutout; their order is what to check.
+        if layered {
+            crate::layers::order_card(ui, self);
+            return;
+        }
         // Finding the character is slow on big drawings, so a slider applies
         // when it's let go (or typed into), not on every frame of the drag.
         let mut apply = false;
@@ -1295,18 +1538,24 @@ impl AppState {
                 doc.update_weights(self.softness);
                 doc.dirty = true;
             }
-            let fill = self.fill_behind;
-            ui.checkbox(&mut self.fill_behind, "Fill behind parts").on_hover_text(
-                "Guess what's hidden behind an arm or the head, so moving them shows more body instead of a hole",
-            );
-            if fill != self.fill_behind
-                && let Some(doc) = &mut self.doc
-            {
-                doc.sprites_dirty = true;
-                doc.dirty = true;
+            // Layers have nothing hidden to guess.
+            if self.doc.as_ref().is_some_and(|d| d.layers.is_none()) {
+                let fill = self.fill_behind;
+                ui.checkbox(&mut self.fill_behind, "Fill behind parts").on_hover_text(
+                    "Guess what's hidden behind an arm or the head, so moving them shows more body instead of a hole",
+                );
+                if fill != self.fill_behind
+                    && let Some(doc) = &mut self.doc
+                {
+                    doc.sprites_dirty = true;
+                    doc.dirty = true;
+                }
             }
         });
-        self.layers_list(ui);
+        // A layered drawing is drawn in its layers' order (see Review).
+        if self.doc.as_ref().is_some_and(|d| d.layers.is_none()) {
+            self.layers_list(ui);
+        }
         fold(ui, "Fine-tune joints", |ui| {
             let overlap = self.overlap;
             ui.add(egui::Slider::new(&mut self.overlap, 0.0..=2.0).text("joint fill"))
@@ -1487,6 +1736,7 @@ impl AppState {
         }
         intro(ui, "Drag the dots onto the character's joints. Each coloured area moves with its bone.");
         card(ui, "Template", |ui| self.template_controls(ui));
+        crate::layers::bones_card(ui, self);
         card(ui, "Bones", |ui| self.bone_tree(ui));
         let sel = self.skel_sel;
         if sel != SkelSel::None {
@@ -1772,6 +2022,80 @@ mod tests {
 
     fn bone_count(state: &AppState) -> usize {
         state.doc.as_ref().unwrap().skeleton.parts.len()
+    }
+
+    /// The layered side-view test character (five PNGs), as dropped files.
+    fn layer_files() -> Vec<(String, Vec<u8>)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../testdata/layered_side");
+        let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), std::fs::read(&p).unwrap()))
+            .collect();
+        // Opened in any order: they're sorted by name.
+        files.reverse();
+        files
+    }
+
+    #[test]
+    fn layers_open_rig_by_name_save_and_reorder() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::default();
+        state.open_files(&ctx, layer_files());
+        assert_eq!(state.step, Step::Review);
+        let side = state.templates.iter().position(|t| t.name == "Person (side)").unwrap();
+        state.apply_template(side);
+        let doc = state.doc.as_ref().unwrap();
+        let layers = doc.layers.as_ref().expect("opened as layers");
+        let names: Vec<&str> = layers.set.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["01 far arm", "02 far leg", "03 body", "04 near leg", "05 near arm"], "bottom to top by name");
+        assert_eq!(doc.name, "character");
+
+        // Each layer guessed its bones from its name.
+        let bones_of = |l: usize| -> Vec<String> {
+            let doc = state.doc.as_ref().unwrap();
+            let mut n: Vec<String> = doc.layers.as_ref().unwrap().bones[l].iter().map(|&b| doc.skeleton.parts[b].name.clone()).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(bones_of(0), ["far forearm", "far upper arm"]);
+        assert_eq!(bones_of(1), ["far foot", "far shin", "far thigh"]);
+        assert_eq!(bones_of(2), ["head", "torso"]);
+        assert_eq!(bones_of(4), ["near forearm", "near upper arm"]);
+
+        // Pieces in the layers' order: the far arm's at the back, the near arm's in front.
+        state.refresh_sprites(&ctx);
+        let doc = state.doc.as_ref().unwrap();
+        let part = |s: &Sprite| doc.skeleton.parts[s.part].name.clone();
+        assert!(part(&doc.sprites[0]).starts_with("far "));
+        assert!(part(doc.sprites.last().unwrap()).starts_with("near "));
+        assert!(doc.sprites.iter().any(|s| part(s) == "far shin"), "the far leg has its own pieces");
+        assert_eq!(doc.meshes.len(), doc.sprites.len());
+
+        // Choosing by hand is one undo step.
+        state.choose_layer_bones(3, vec!["near thigh".into()]);
+        assert_eq!(state.doc.as_ref().unwrap().layers.as_ref().unwrap().bones[3].len(), 1);
+        state.undo();
+        assert_eq!(state.doc.as_ref().unwrap().layers.as_ref().unwrap().bones[3].len(), 3);
+        state.choose_layer_bones(3, vec!["near thigh".into()]);
+
+        // Saved and opened again: the layers, their order and the choice come back.
+        let path = std::env::temp_dir().join(format!("pm2d_layers_test_{}.pm2d", std::process::id()));
+        state.save_to(&path);
+        let mut fresh = AppState::default();
+        fresh.open(&ctx, &path);
+        std::fs::remove_file(&path).unwrap();
+        let back = fresh.doc.as_ref().expect("reopened").layers.as_ref().expect("still layered");
+        assert_eq!(back.set.layers.len(), 5);
+        assert_eq!(back.set.layers[2].name, "03 body");
+        assert_eq!(back.chosen[3], ["near thigh"]);
+        assert_eq!(back.set.layers[4].image, state.doc.as_ref().unwrap().layers.as_ref().unwrap().set.layers[4].image);
+
+        // Reverse the order: the near arm is now at the bottom.
+        state.reorder_layers(&ctx, &[4, 3, 2, 1, 0]);
+        let layers = state.doc.as_ref().unwrap().layers.as_ref().unwrap();
+        assert_eq!(layers.set.layers[0].name, "05 near arm");
+        assert_eq!(layers.chosen[1], ["near thigh"], "choices move with their layer");
     }
 
     #[test]

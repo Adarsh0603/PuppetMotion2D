@@ -4,6 +4,8 @@
 //!
 //! `format_version` starts at 1. A newer app can read older files (new fields
 //! get defaults); an older app refuses files newer than it understands.
+//! Format 2 adds drawing layers (`layers/NNN.png`, listed in `layers`); a
+//! project without layers is still written as format 1.
 
 use crate::cutout::Params;
 use crate::motion::Motion;
@@ -13,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-/// The newest project format this build reads and the one it writes.
-pub const FORMAT_VERSION: u32 = 1;
+/// The newest project format this build reads (and writes, for layered projects).
+pub const FORMAT_VERSION: u32 = 2;
 
 pub const EXTENSION: &str = "pm2d";
 
@@ -48,46 +50,89 @@ pub struct ProjectData {
     /// switched on (also for older projects): its guesses aren't reliable yet.
     #[serde(default)]
     pub fill_behind: bool,
+    /// Drawing layers, bottom to top (none for a single drawing).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<LayerInfo>,
+}
+
+/// One saved drawing layer.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerInfo {
+    pub name: String,
+    /// Its PNG inside the project file.
+    pub file: String,
+    /// Bones chosen by hand for it to move with; empty = guessed.
+    #[serde(default)]
+    pub bones: Vec<String>,
 }
 
 fn default_overlap() -> f32 {
     1.0
 }
 
-/// A loaded project: its data plus the original image file's bytes and extension.
+/// A loaded project: its data plus the original image file's bytes and
+/// extension, and each layer's PNG bytes (in `data.layers` order).
 pub struct LoadedProject {
     pub data: ProjectData,
     pub image_bytes: Vec<u8>,
     pub image_ext: String,
+    pub layer_pngs: Vec<Vec<u8>>,
 }
 
 /// Write a project. Goes to a temporary file first and is then renamed into
 /// place, so a crash mid-save never leaves a half-written project behind.
-pub fn save_project(path: &Path, data: &ProjectData, image_bytes: &[u8], image_ext: &str) -> io::Result<()> {
+/// `layer_pngs` holds each of `data.layers`' PNG bytes, in order.
+pub fn save_project(path: &Path, data: &ProjectData, image_bytes: &[u8], image_ext: &str, layer_pngs: &[Vec<u8>]) -> io::Result<()> {
     let tmp = path.with_extension(format!("{EXTENSION}.tmp"));
-    write_project(std::fs::File::create(&tmp)?, data, image_bytes, image_ext)?;
+    write_project(std::fs::File::create(&tmp)?, data, image_bytes, image_ext, layer_pngs)?;
     std::fs::rename(&tmp, path)
 }
 
 /// A project as the bytes of a `.pm2d` file (for the browser, where it's
 /// downloaded instead of written to a path).
-pub fn project_to_bytes(data: &ProjectData, image_bytes: &[u8], image_ext: &str) -> io::Result<Vec<u8>> {
+pub fn project_to_bytes(data: &ProjectData, image_bytes: &[u8], image_ext: &str, layer_pngs: &[Vec<u8>]) -> io::Result<Vec<u8>> {
     let mut out = io::Cursor::new(Vec::new());
-    write_project(&mut out, data, image_bytes, image_ext)?;
+    write_project(&mut out, data, image_bytes, image_ext, layer_pngs)?;
     Ok(out.into_inner())
 }
 
-fn write_project<W: Write + io::Seek>(to: W, data: &ProjectData, image_bytes: &[u8], image_ext: &str) -> io::Result<()> {
+/// The format to save a project in: 2 with layers, else 1, so projects
+/// without layers still open in older builds.
+pub fn format_for(has_layers: bool) -> u32 {
+    if has_layers { 2 } else { 1 }
+}
+
+/// The file name a layer is saved under inside the project.
+pub fn layer_file(index: usize) -> String {
+    format!("layers/{index:03}.png")
+}
+
+fn write_project<W: Write + io::Seek>(
+    to: W,
+    data: &ProjectData,
+    image_bytes: &[u8],
+    image_ext: &str,
+    layer_pngs: &[Vec<u8>],
+) -> io::Result<()> {
     use zip::write::SimpleFileOptions;
+    if layer_pngs.len() != data.layers.len() {
+        return Err(io::Error::other("every layer needs its image"));
+    }
     let mut zip = zip::ZipWriter::new(to);
     let deflate = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     zip.start_file(JSON_NAME, deflate).map_err(io::Error::other)?;
-    let json = serde_json::to_vec_pretty(data).map_err(io::Error::other)?;
+    // Layers need format 2 (see `format_for`).
+    let version = if data.layers.is_empty() { data.format_version } else { data.format_version.max(2) };
+    let json = serde_json::to_vec_pretty(&ProjectData { format_version: version, ..data.clone() }).map_err(io::Error::other)?;
     zip.write_all(&json)?;
     // Images are already compressed; store them as-is.
     let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip.start_file(format!("{IMAGE_STEM}{image_ext}"), stored).map_err(io::Error::other)?;
     zip.write_all(image_bytes)?;
+    for (info, png) in data.layers.iter().zip(layer_pngs) {
+        zip.start_file(&info.file, stored).map_err(io::Error::other)?;
+        zip.write_all(png)?;
+    }
     zip.finish().map_err(io::Error::other)?;
     Ok(())
 }
@@ -126,7 +171,13 @@ fn read_project<R: Read + io::Seek>(from: R) -> io::Result<LoadedProject> {
     let mut image_bytes = Vec::new();
     zip.by_name(&image_name).map_err(io::Error::other)?.read_to_end(&mut image_bytes)?;
     let image_ext = image_name[IMAGE_STEM.len()..].to_string();
-    Ok(LoadedProject { data, image_bytes, image_ext })
+    let mut layer_pngs = Vec::with_capacity(data.layers.len());
+    for info in &data.layers {
+        let mut png = Vec::new();
+        zip.by_name(&info.file).map_err(|_| bad(format!("layer \"{}\" is missing from the project", info.name)))?.read_to_end(&mut png)?;
+        layer_pngs.push(png);
+    }
+    Ok(LoadedProject { data, image_bytes, image_ext, layer_pngs })
 }
 
 #[cfg(test)]
@@ -161,17 +212,19 @@ mod tests {
                 m.offset_x.push(crate::motion::Key { t: 0.5, value: 2.0, ease: crate::motion::Ease::Hold });
                 m
             },
+            layers: Vec::new(),
         }
     }
 
     #[test]
     fn round_trip() {
         let path = temp_path("roundtrip");
-        let data = sample();
+        let data = ProjectData { format_version: format_for(false), ..sample() };
         let image = vec![1u8, 2, 3, 250, 0, 7];
-        save_project(&path, &data, &image, "jpg").unwrap();
+        save_project(&path, &data, &image, "jpg", &[]).unwrap();
         let loaded = load_project(&path).unwrap();
         assert_eq!(loaded.data, data);
+        assert_eq!(loaded.data.format_version, 1, "no layers: still format 1");
         assert_eq!(loaded.image_bytes, image);
         assert_eq!(loaded.image_ext, "jpg");
         std::fs::remove_file(&path).unwrap();
@@ -180,7 +233,7 @@ mod tests {
     #[test]
     fn round_trip_in_memory() {
         let data = sample();
-        let bytes = project_to_bytes(&data, &[9, 8, 7], "png").unwrap();
+        let bytes = project_to_bytes(&data, &[9, 8, 7], "png", &[]).unwrap();
         let loaded = project_from_bytes(&bytes).unwrap();
         assert_eq!(loaded.data, data);
         assert_eq!(loaded.image_bytes, vec![9, 8, 7]);
@@ -188,10 +241,30 @@ mod tests {
     }
 
     #[test]
+    fn layers_round_trip() {
+        let layer = |i: usize, name: &str, bones: &[&str]| LayerInfo {
+            name: name.into(),
+            file: layer_file(i),
+            bones: bones.iter().map(|b| b.to_string()).collect(),
+        };
+        let data = ProjectData {
+            format_version: format_for(true),
+            layers: vec![layer(0, "far leg", &[]), layer(1, "body", &["torso", "head"])],
+            ..sample()
+        };
+        let pngs = vec![vec![1u8, 1], vec![2u8, 2, 2]];
+        let loaded = project_from_bytes(&project_to_bytes(&data, &[0], "png", &pngs).unwrap()).unwrap();
+        assert_eq!(loaded.data, data);
+        assert_eq!(loaded.data.format_version, 2);
+        assert_eq!(loaded.layer_pngs, pngs);
+        assert!(project_to_bytes(&data, &[0], "png", &pngs[..1]).is_err(), "a layer without its image");
+    }
+
+    #[test]
     fn newer_format_is_refused() {
         let path = temp_path("future");
         let data = ProjectData { format_version: FORMAT_VERSION + 1, ..sample() };
-        save_project(&path, &data, &[0], "png").unwrap();
+        save_project(&path, &data, &[0], "png", &[]).unwrap();
         let err = load_project(&path).err().unwrap().to_string();
         assert!(err.contains("newer version"), "{err}");
         std::fs::remove_file(&path).unwrap();

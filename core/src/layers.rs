@@ -148,19 +148,21 @@ impl Layers {
     }
 
     /// The pieces to draw, back to front: every layer bottom to top, each
-    /// split along its bones (in their drawing order). `overlap` is the joint
-    /// disc size, as in `build_sprites`.
-    pub fn pieces(&self, skel: &Skeleton, bones: &[Vec<usize>], overlap: f32) -> Vec<Sprite> {
-        let mut out = Vec::new();
+    /// split along its bones (in their drawing order), and the layer each
+    /// piece came from. `overlap` is the joint disc size, as in `build_sprites`.
+    pub fn pieces(&self, skel: &Skeleton, bones: &[Vec<usize>], overlap: f32) -> (Vec<Sprite>, Vec<usize>) {
+        let (mut out, mut from) = (Vec::new(), Vec::new());
         let mut labels = Vec::new();
         for l in 0..self.layers.len() {
             self.split(l, skel, bones, &mut labels);
             let (w, h) = self.size();
             let masks = masks_from_labels(&labels, w, h, skel.parts.len());
             let sprites = build_sprites(&self.layers[l].image, &self.masks[l], &self.dts[l], skel, &masks, overlap, false);
-            out.extend(in_paint_order(sprites, skel));
+            let pieces = in_paint_order(sprites, skel);
+            from.extend(std::iter::repeat_n(l, pieces.len()));
+            out.extend(pieces);
         }
-        out
+        (out, from)
     }
 
     /// Layer `l` split along its bones, as a part-per-pixel map.
@@ -312,9 +314,10 @@ mod tests {
         assert_eq!(layers.guess_bones(&skel), vec![vec![2], vec![0], vec![1]]);
         // Each leg layer is all its own leg, even though both bones lie on both.
         let bones = layers.bones(&skel, &[]);
-        let pieces = layers.pieces(&skel, &bones, 0.0);
+        let (pieces, from) = layers.pieces(&skel, &bones, 0.0);
         let parts: Vec<usize> = pieces.iter().map(|s| s.part).collect();
         assert_eq!(parts, vec![2, 0, 1], "back to front: far leg, body, near leg");
+        assert_eq!(from, vec![0, 1, 2], "one piece from each layer");
         let far = &pieces[0];
         assert_eq!((far.image.width(), far.image.height()), (20, 90), "the whole far leg layer");
     }
