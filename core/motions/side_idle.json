@@ -1,0 +1,17 @@
+{
+  "name": "Idle",
+  "template": "Person (side)",
+  "duration": 2.0,
+  "rest": {"torso": -90, "head": -90, "near thigh": 90, "near shin": 90, "near upper arm": 90, "near forearm": 90, "far thigh": 90, "far shin": 90, "far upper arm": 90, "far forearm": 90, "near foot": 0, "far foot": 0},
+  "tracks": {
+    "torso": [[0, 0], [1, -2], [2.0, 0]],
+    "head": [[0, 0], [1, 3], [2.0, 0]],
+    "near thigh": [[0, 0], [1, 2.0], [2.0, 0.0]],
+    "near upper arm": [[0, 2], [1, 7.0], [2.0, 2.0]],
+    "near forearm": [[0, -8], [1, -12], [2.0, -8]],
+    "far thigh": [[0, 0], [1, 2.0], [2.0, 0.0]],
+    "far upper arm": [[0, 2], [1, 7.0], [2.0, 2.0]],
+    "far forearm": [[0, -8], [1, -12], [2.0, -8]]
+  },
+  "bob": [[0, 0], [1, 0.006], [2.0, 0]]
+}

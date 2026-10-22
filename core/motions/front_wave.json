@@ -1,0 +1,12 @@
+{
+  "name": "Wave",
+  "template": "Person (front)",
+  "duration": 1.6,
+  "rest": {"torso": -90, "head": -90, "left thigh": 90, "left shin": 90, "left upper arm": 90, "left forearm": 90, "right thigh": 90, "right shin": 90, "right upper arm": 90, "right forearm": 90},
+  "tracks": {
+    "head": [[0, 0], [0.3, 5], [1.3, 5], [1.6, 0]],
+    "right upper arm": [[0, 0], [0.3, -140], [1.3, -140], [1.6, 0]],
+    "right forearm": [[0, 0], [0.3, -40], [0.5, 0], [0.7, -40], [0.9, 0], [1.1, -40], [1.3, -40], [1.6, 0]],
+    "left upper arm": [[0, 0], [1.6, 0]]
+  }
+}

@@ -3,6 +3,7 @@
 pub mod background;
 pub mod components;
 pub mod cutout;
+pub mod cycles;
 pub mod fill;
 pub mod geom;
 pub mod history;
@@ -18,6 +19,7 @@ pub mod template;
 pub mod weight_paint;
 
 pub use cutout::{Params, foreground_mask};
+pub use cycles::{Cycle, CycleKey, builtin_cycles, faces_left};
 pub use geom::RectI;
 pub use history::History;
 pub use mask::Mask;

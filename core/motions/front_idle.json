@@ -1,0 +1,15 @@
+{
+  "name": "Idle",
+  "template": "Person (front)",
+  "duration": 2.0,
+  "rest": {"torso": -90, "head": -90, "left thigh": 90, "left shin": 90, "left upper arm": 90, "left forearm": 90, "right thigh": 90, "right shin": 90, "right upper arm": 90, "right forearm": 90},
+  "tracks": {
+    "torso": [[0, 0], [2.0, 0]],
+    "head": [[0, 0], [1, 2], [2.0, 0]],
+    "left upper arm": [[0, 3], [1, 6], [2.0, 3]],
+    "right upper arm": [[0, -3], [1, -6], [2.0, -3]],
+    "left forearm": [[0, -3], [1, -6], [2.0, -3]],
+    "right forearm": [[0, 3], [1, 6], [2.0, 3]]
+  },
+  "bob": [[0, 0], [1, 0.006], [2.0, 0]]
+}

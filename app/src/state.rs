@@ -3,7 +3,7 @@ use crate::export::ExportUi;
 use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
     NO_PART, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -301,6 +301,8 @@ pub struct AppState {
     pub template_choice: usize,
     /// Name typed under "Save as template".
     pub template_name: String,
+    /// Ready-made motions offered in Animate (those that fit the skeleton).
+    pub cycles: Vec<Cycle>,
     /// Side-view templates are placed facing left (mirrored) instead of right.
     pub facing_left: bool,
     /// Screen x of the canvas's left edge last frame (the side panel's right
@@ -355,6 +357,7 @@ impl Default for AppState {
             templates: crate::templates::all(),
             template_choice: 0,
             template_name: String::new(),
+            cycles: anim_core::builtin_cycles(),
             facing_left: false,
             canvas_left: 0.0,
             status: "Open or drop a drawing to start.".into(),
@@ -589,6 +592,23 @@ impl AppState {
             self.playhead = 0.0;
         }
         self.playing = true;
+    }
+
+    /// Replace the motion with a ready-made one fitted to this character, and play it.
+    pub fn apply_cycle(&mut self, cycle: &Cycle) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        let figure_h = doc.figure_box().h as f32;
+        let facing_left = anim_core::faces_left(&doc.skeleton);
+        doc.motion = cycle.to_motion(&doc.skeleton, figure_h, doc.motion.fps, facing_left);
+        doc.pose = doc.motion.sample(0.0, &doc.skeleton);
+        self.key_sel.clear();
+        self.unkeyed_pose = false;
+        self.playhead = 0.0;
+        self.sampled_at = 0.0;
+        self.playing = true;
+        self.status = format!("{}: change any key on the timeline to make it your own", cycle.name);
+        self.commit(before);
     }
 
     /// Key every part at the playhead, as currently posed.
@@ -1219,7 +1239,8 @@ impl AppState {
         if self.doc.is_none() {
             return;
         }
-        intro(ui, "Drag the white dots to pose. Press K to keep the pose at this frame, then move along the timeline and pose again.");
+        intro(ui, "Pick a ready-made motion, or drag the white dots to pose. Press K to keep the pose at this frame, then move along the timeline and pose again.");
+        self.quick_motions(ui);
         card(ui, "Pose", |ui| {
             if ui.button("Reset pose").on_hover_text("Back to as drawn (removes the keys at this frame)").clicked() {
                 let before = self.snapshot();
@@ -1272,6 +1293,35 @@ impl AppState {
                 doc.dirty = true;
             }
         });
+    }
+
+    /// "Quick motions": one button per ready-made motion that fits the skeleton.
+    fn quick_motions(&mut self, ui: &mut egui::Ui) {
+        let Some(doc) = &self.doc else { return };
+        let fitting: Vec<Cycle> = self.cycles.iter().filter(|c| c.matches(&doc.skeleton)).cloned().collect();
+        let has_keys = !doc.motion.is_empty();
+        let mut chosen = None;
+        card(ui, "Quick motions", |ui| {
+            if fitting.is_empty() {
+                ui.label(
+                    egui::RichText::new("None fit this skeleton. Ready-made motions need a rig from the Person templates.")
+                        .small()
+                        .weak(),
+                );
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
+                for c in &fitting {
+                    let hint = if has_keys { "Replaces the current animation (Ctrl+Z undoes)" } else { "Fills the timeline with this motion" };
+                    if ui.button(&c.name).on_hover_text(hint).clicked() {
+                        chosen = Some(c.clone());
+                    }
+                }
+            });
+        });
+        if let Some(c) = chosen {
+            self.apply_cycle(&c);
+        }
     }
 
     /// "Layers": every part from front (top) to back, with buttons to move it
@@ -2030,6 +2080,26 @@ mod tests {
         assert!(doc.dirty);
         state.undo();
         assert_eq!(state.doc.as_ref().unwrap().skeleton.paint_order(), before);
+    }
+
+    #[test]
+    fn a_quick_motion_fills_the_timeline_plays_and_undoes() {
+        let mut state = open_sample();
+        let side = state.templates.iter().position(|t| t.name == "Person (side)").expect("built in");
+        state.apply_template(side);
+        state.set_step(Step::Animate);
+        let skel = state.doc.as_ref().unwrap().skeleton.clone();
+        let fitting: Vec<Cycle> = state.cycles.iter().filter(|c| c.matches(&skel)).cloned().collect();
+        assert!(fitting.iter().any(|c| c.name == "Walk") && !fitting.iter().any(|c| c.name == "Wave"));
+
+        let walk = fitting.iter().find(|c| c.name == "Walk").unwrap().clone();
+        state.apply_cycle(&walk);
+        let m = &state.doc.as_ref().unwrap().motion;
+        assert_eq!(m.duration, walk.duration);
+        assert!(m.tracks.contains_key("near thigh") && !m.offset_y.is_empty());
+        assert!(state.playing);
+        state.undo();
+        assert!(state.doc.as_ref().unwrap().motion.is_empty());
     }
 
     #[test]
