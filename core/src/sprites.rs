@@ -98,6 +98,18 @@ pub fn build_sprites(
         .collect()
 }
 
+/// The pieces to draw, back to front: `sprites` (one per part, as
+/// `build_sprites` makes them) in the skeleton's painting order, without the
+/// empty ones. The canvas and the export draw pieces in list order.
+pub fn in_paint_order(sprites: Vec<Sprite>, skel: &Skeleton) -> Vec<Sprite> {
+    let mut by_part: Vec<Option<Sprite>> = sprites.into_iter().map(Some).collect();
+    skel.paint_order()
+        .into_iter()
+        .filter_map(|p| by_part.get_mut(p).and_then(Option::take))
+        .filter(|s| s.image.width() > 0)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

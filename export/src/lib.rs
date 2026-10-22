@@ -1,9 +1,9 @@
 //! Animation export: render every frame on the CPU and write them out as a
 //! PNG sequence or an animated GIF. Must never depend on UI crates.
 //!
-//! Frames are drawn the way the canvas draws Pose mode: each part's sprite
-//! moved by its part's transform, parents first so children sit on top,
-//! sampled with bilinear filtering.
+//! Frames are drawn the way the canvas draws Pose mode: each piece (a sprite
+//! and its mesh) moved by its bone's transform, in list order (back to
+//! front), sampled with bilinear filtering.
 
 use anim_core::{PartMesh, Pose, RectI, Skeleton, Sprite, world_transforms};
 use image::RgbaImage;
@@ -63,10 +63,11 @@ pub enum Outcome {
 
 /// Everything needed to render, owned so it can run on another thread.
 pub struct Job {
+    /// The pieces, drawn in this order (back to front). Each moves with its `part`.
     pub sprites: Vec<Sprite>,
-    /// Each part's mesh over its sprite (as the canvas draws it), bent by the
-    /// bones. A part without one (or with an empty one) is drawn as its
-    /// sprite turned rigidly.
+    /// Each piece's mesh over its sprite, same order (as the canvas draws
+    /// it), bent by the bones. A piece without one (or with an empty one) is
+    /// drawn as its sprite turned rigidly.
     pub meshes: Vec<PartMesh>,
     pub skeleton: Skeleton,
     /// One pose per frame.
@@ -101,8 +102,8 @@ pub fn frame_area(
     };
     for pose in poses {
         let t = world_transforms(skeleton, pose);
-        for s in sprites.iter().filter(|s| s.image.width() > 0 && s.part < t.len()) {
-            match meshes.get(s.part).filter(|m| !m.triangles.is_empty()) {
+        for (i, s) in sprites.iter().enumerate().filter(|(_, s)| s.image.width() > 0 && s.part < t.len()) {
+            match meshes.get(i).filter(|m| !m.triangles.is_empty()) {
                 Some(m) => m.deform(&t).into_iter().for_each(&mut grow),
                 None => sprite_corners(s).into_iter().for_each(|c| grow(t[s.part].apply(c))),
             }
@@ -149,9 +150,12 @@ impl Job {
 
         // Drawing-space point → output pixel coordinates.
         let to_out = |q: [f32; 2]| [(q[0] - area.x as f32) / sx, (q[1] - area.y as f32) / sy];
-        for p in self.skeleton.paint_order() {
-            let Some(sprite) = self.sprites.get(p).filter(|s| s.image.width() > 0) else { continue };
-            if let Some(mesh) = self.meshes.get(p).filter(|m| !m.triangles.is_empty()) {
+        for (i, sprite) in self.sprites.iter().enumerate() {
+            let p = sprite.part;
+            if sprite.image.width() == 0 || p >= t.len() {
+                continue;
+            }
+            if let Some(mesh) = self.meshes.get(i).filter(|m| !m.triangles.is_empty()) {
                 let moved: Vec<[f32; 2]> = mesh.deform(&t).into_iter().map(to_out).collect();
                 for tri in &mesh.triangles {
                     let corner = |k: usize| (moved[tri[k] as usize], mesh.uvs[tri[k] as usize]);

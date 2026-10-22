@@ -214,10 +214,10 @@ fn draw_posed(painter: &egui::Painter, canvas: Rect, state: &AppState, hover: Op
     let t = world_transforms(skel, &doc.pose);
     let to_screen = |p: [f32; 2]| view.image_to_screen(canvas, pos2(p[0], p[1]));
 
-    // Each part is its triangle mesh over its sprite, bent by the bones.
+    // Each piece is its triangle mesh over its sprite, bent by the bones, drawn back to front.
     let mut wire = Vec::new();
-    for p in skel.paint_order() {
-        let (Some(part), Some(Some(tex))) = (doc.meshes.get(p), doc.sprite_tex.get(p)) else { continue };
+    for (i, part) in doc.meshes.iter().enumerate() {
+        let (p, Some(Some(tex))) = (part.part, doc.sprite_tex.get(i)) else { continue };
         let moved: Vec<Pos2> = part.deform(&t).into_iter().map(to_screen).collect();
         let mut mesh = egui::Mesh::with_texture(tex.id());
         for (&pos, uv) in moved.iter().zip(&part.uvs) {
@@ -296,8 +296,8 @@ fn draw_weight_heat(painter: &egui::Painter, canvas: Rect, state: &AppState, bon
         let mix = |k: usize| (cold[k] + (hot[k] - cold[k]) * w) as u8;
         Color32::from_rgba_unmultiplied(mix(0), mix(1), mix(2), (120.0 + 70.0 * w) as u8)
     };
-    for m in &doc.meshes {
-        let Some(Some(shape)) = doc.silhouette_tex.get(m.part) else { continue };
+    for (i, m) in doc.meshes.iter().enumerate() {
+        let Some(Some(shape)) = doc.silhouette_tex.get(i) else { continue };
         let mut mesh = egui::Mesh::with_texture(shape.id());
         for ((p, ws), uv) in m.points.iter().zip(&m.weights).zip(&m.uvs) {
             let w = ws.iter().find(|&&(b, _)| b == bone).map_or(0.0, |&(_, w)| w);

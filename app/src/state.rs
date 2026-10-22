@@ -3,7 +3,7 @@ use crate::export::ExportUi;
 use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites, in_paint_order,
     NO_PART, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -1000,15 +1000,17 @@ impl AppState {
         }
         doc.sprites_dirty = false;
         doc.skel_masks = masks_from_labels(&doc.skel_labels, doc.fg.w, doc.fg.h, doc.skeleton.parts.len());
-        doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap, self.fill_behind);
+        // The pieces, back to front; the canvas and export draw them in this order.
+        let sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap, self.fill_behind);
+        doc.sprites = in_paint_order(sprites, &doc.skeleton);
         doc.meshes = build_meshes(&doc.sprites, cell_size(doc.figure_box()));
         doc.update_weights(self.softness);
         doc.sprite_tex = doc
             .sprites
             .iter()
-            .map(|s| {
-                (s.image.width() > 0)
-                    .then(|| ctx.load_texture(format!("part {}", s.part), to_color_image(&s.image), SMOOTH))
+            .enumerate()
+            .map(|(i, s)| {
+                (s.image.width() > 0).then(|| ctx.load_texture(format!("piece {i}"), to_color_image(&s.image), SMOOTH))
             })
             .collect();
         // Each part's shape in white, which the weight heat map is tinted
@@ -1016,12 +1018,13 @@ impl AppState {
         doc.silhouette_tex = doc
             .sprites
             .iter()
-            .map(|s| {
+            .enumerate()
+            .map(|(i, s)| {
                 (s.image.width() > 0).then(|| {
                     let white: Vec<Color32> =
                         s.image.pixels().map(|p| Color32::from_rgba_unmultiplied(255, 255, 255, p.0[3])).collect();
                     let image = ColorImage::new([s.image.width() as usize, s.image.height() as usize], white);
-                    ctx.load_texture(format!("part {} shape", s.part), image, SMOOTH)
+                    ctx.load_texture(format!("piece {i} shape"), image, SMOOTH)
                 })
             })
             .collect();
@@ -1035,6 +1038,8 @@ impl AppState {
         if p >= doc.skeleton.parts.len() || !doc.skeleton.move_layer(p, to) {
             return;
         }
+        // The pieces are kept in drawing order.
+        doc.sprites_dirty = true;
         let name = &doc.skeleton.parts[p].name;
         self.status = match to {
             Toward::Front => format!("Moved {name} forward"),
@@ -1804,10 +1809,11 @@ mod tests {
         let ctx = egui::Context::default();
         state.refresh_sprites(&ctx);
         let doc = state.doc.as_ref().unwrap();
-        assert_eq!(doc.sprites.len(), 10);
-        // The auto-placed template misses the raised right arm (its forearm
-        // points where nothing is drawn), so not every part gets pixels.
-        assert!(doc.sprite_tex.iter().filter(|t| t.is_some()).count() >= 8);
+        // One piece per part with pixels. The auto-placed template misses the
+        // raised right arm (its forearm points where nothing is drawn), so not
+        // every part gets one.
+        assert!((8..=10).contains(&doc.sprites.len()), "{} pieces", doc.sprites.len());
+        assert!(doc.sprite_tex.iter().all(Option::is_some));
 
         // Pose the left arm as one undoable step (what a drag does).
         let before = state.snapshot();
@@ -2181,16 +2187,18 @@ mod tests {
         state.doc.as_mut().unwrap().sprites_dirty = true;
         state.refresh_sprites(&ctx);
         let doc = state.doc.as_ref().unwrap();
-        assert_eq!(doc.meshes.len(), doc.skeleton.parts.len());
+        // One mesh per piece, in the same order, and every piece has pixels.
+        assert_eq!(doc.meshes.len(), doc.sprites.len());
         for (m, s) in doc.meshes.iter().zip(&doc.sprites) {
-            assert_eq!(m.triangles.is_empty(), s.image.width() == 0, "part {}: a mesh exactly when it has pixels", m.part);
+            assert_eq!(m.part, s.part);
+            assert!(!m.triangles.is_empty(), "part {}: a mesh over its pixels", m.part);
         }
-        // Rigid for now: a posed part's mesh moves exactly with its bone.
-        let arm = doc.meshes.iter().position(|m| !m.triangles.is_empty() && m.part != 1).unwrap();
+        // Rigid: a posed part's mesh moves exactly with its bone.
+        let m = doc.meshes.iter().find(|m| m.part != 1).unwrap();
+        let arm = m.part;
         let mut pose = doc.pose.clone();
         pose.set_angle(arm, 0.6);
         let t = anim_core::world_transforms(&doc.skeleton, &pose);
-        let m = &doc.meshes[arm];
         for (moved, p) in m.deform(&t).iter().zip(&m.points) {
             let want = t[arm].apply(*p);
             assert!((moved[0] - want[0]).abs() < 1e-3 && (moved[1] - want[1]).abs() < 1e-3);
@@ -2204,7 +2212,7 @@ mod tests {
         state.set_step(Step::Rig);
         state.refresh_sprites(&ctx);
         let head = state.doc.as_ref().unwrap().skeleton.parts.iter().position(|p| p.name == "head").unwrap();
-        let torso_mesh = 1;
+        let torso_mesh = state.doc.as_ref().unwrap().meshes.iter().position(|m| m.part == 1).unwrap();
         let pull = |state: &AppState| -> f32 {
             let m = &state.doc.as_ref().unwrap().meshes[torso_mesh];
             m.weights.iter().map(|w| w.iter().find(|x| x.0 == head).map_or(0.0, |x| x.1)).sum()

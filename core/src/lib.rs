@@ -29,7 +29,7 @@ pub use project::{LoadedProject, ProjectData, load_project, project_from_bytes, 
 pub use rig::{
     Affine2, Pose, aim_part, angle_to_point, clamp_to_limit, ik_parent, posed_joint, solve_two_bone, world_transforms,
 };
-pub use sprites::{Sprite, build_sprites};
+pub use sprites::{Sprite, build_sprites, in_paint_order};
 pub use skeleton::{Joint, NO_PART, SkelPart, Skeleton, SkeletonMasks, Toward, distance_transform, masks_from_labels, part_labels, skeleton_masks, skeleton_masks_with_dt};
 pub use template::Template;
 pub use weight_paint::{WeightPaint, apply_paint};
