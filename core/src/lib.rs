@@ -7,6 +7,7 @@ pub mod cycles;
 pub mod fill;
 pub mod geom;
 pub mod history;
+pub mod layers;
 pub mod mask;
 pub mod mesh;
 pub mod par;
@@ -22,6 +23,7 @@ pub use cutout::{Params, foreground_mask};
 pub use cycles::{Cycle, CycleKey, builtin_cycles, faces_left};
 pub use geom::RectI;
 pub use history::History;
+pub use layers::{Layer, Layers};
 pub use mask::Mask;
 pub use mesh::{PartMesh, build_meshes, cell_size, smooth_weights};
 pub use motion::{Clip, Ease, Key, KeyRef, Motion, TrackId};
@@ -30,6 +32,6 @@ pub use rig::{
     Affine2, Pose, aim_part, angle_to_point, clamp_to_limit, ik_parent, posed_joint, solve_two_bone, world_transforms,
 };
 pub use sprites::{Sprite, build_sprites, in_paint_order};
-pub use skeleton::{Joint, NO_PART, SkelPart, Skeleton, SkeletonMasks, Toward, distance_transform, masks_from_labels, part_labels, skeleton_masks, skeleton_masks_with_dt};
+pub use skeleton::{Joint, NO_PART, SkelPart, Skeleton, SkeletonMasks, Toward, distance_transform, masks_from_labels, part_labels, part_labels_among, skeleton_masks, skeleton_masks_with_dt};
 pub use template::Template;
 pub use weight_paint::{WeightPaint, apply_paint};

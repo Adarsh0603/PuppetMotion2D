@@ -417,12 +417,27 @@ pub fn masks_from_labels(labels: &[u16], w: u32, h: u32, parts: usize) -> Vec<Ma
 /// map `dt` and the character's bounding box `bbox`. Only that box is
 /// scanned, spread over the CPU cores.
 pub fn part_labels(fg: &Mask, dt: &[f32], bbox: Option<RectI>, skel: &Skeleton, labels: &mut Vec<u16>) -> Vec<f32> {
+    part_labels_among(fg, dt, bbox, skel, &vec![true; skel.parts.len()], labels)
+}
+
+/// `part_labels`, giving pixels only to the parts `among` allows (one flag
+/// per part): a drawing layer of one leg is split along that leg's bones
+/// only. With none allowed, nothing is labelled.
+pub fn part_labels_among(
+    fg: &Mask,
+    dt: &[f32],
+    bbox: Option<RectI>,
+    skel: &Skeleton,
+    among: &[bool],
+    labels: &mut Vec<u16>,
+) -> Vec<f32> {
     let bones: Vec<_> = (0..skel.parts.len()).map(|i| skel.bone(i)).collect();
     let radii: Vec<f32> = bones.iter().map(|&(a, b)| bone_radius(dt, fg.w, fg.h, a, b)).collect();
     let (w, h) = (fg.w as usize, fg.h as usize);
     labels.clear();
     labels.resize(w * h, NO_PART);
-    let Some(bb) = bbox.filter(|_| !bones.is_empty()) else {
+    let allowed = |i: usize| among.get(i).copied().unwrap_or(false);
+    let Some(bb) = bbox.filter(|_| (0..bones.len()).any(allowed)) else {
         return radii;
     };
     // A part stops dead at a joint where it meets another part, like a paper
@@ -445,6 +460,10 @@ pub fn part_labels(fg: &Mask, dt: &[f32], bbox: Option<RectI>, skel: &Skeleton, 
             }
             let p = [x as f32 + 0.5, y as f32 + 0.5];
             for (i, &(a, b)) in bones.iter().enumerate() {
+                if !allowed(i) {
+                    (capsule[i], cost[i]) = (f32::INFINITY, f32::INFINITY);
+                    continue;
+                }
                 capsule[i] = dist_to_segment(p, a, b) - radii[i];
                 let t = along(p, a, b);
                 let cut = (t < 0.0 && cut_at_pivot[i]) || (t > 1.0 && cut_at_tip[i]);
