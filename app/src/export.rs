@@ -54,6 +54,8 @@ struct Running {
 enum Sink {
     Gif(anim_export::GifWriter<Vec<u8>>),
     Frames(Box<anim_export::FramesZip>),
+    /// Downloaded as a zip holding the sheet PNG and its JSON.
+    Sheet(Box<anim_export::SheetWriter>),
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -154,8 +156,9 @@ pub fn panel(ui: &mut egui::Ui, state: &mut AppState) {
 
     card(ui, "Save", |ui| {
         let buttons = [
-            (Format::Gif, "Export GIF…", "One looping animated GIF, for sharing and previews"),
-            (Format::Png, "Export frames…", "One PNG per frame in a folder, for game engines"),
+            (Format::Gif, "Export GIF", "One looping animated GIF, for sharing and previews"),
+            (Format::Sheet, "Export sprite sheet", "Every frame on a grid in one PNG, plus a JSON file with each frame's place and timing, for game engines"),
+            (Format::Png, "Export frames", "One PNG per frame in a folder"),
         ];
         for (format, label, hint) in buttons {
             let text = egui::RichText::new(label).size(15.0).strong();
@@ -217,6 +220,10 @@ pub fn poll(ctx: &egui::Context, state: &mut AppState) {
         let added = match &mut r.sink {
             Sink::Gif(gif) => gif.add_frame(frame),
             Sink::Frames(zip) => zip.add_frame(&frame),
+            Sink::Sheet(sheet) => {
+                sheet.add_frame(&frame);
+                Ok(())
+            }
         };
         r.next += 1;
         if let Err(e) = added {
@@ -231,6 +238,16 @@ pub fn poll(ctx: &egui::Context, state: &mut AppState) {
     let (bytes, mime) = match r.sink {
         Sink::Gif(gif) => (gif.finish(), "image/gif"),
         Sink::Frames(zip) => ((*zip).finish(), "application/zip"),
+        Sink::Sheet(sheet) => {
+            let stem = r.file_name.trim_end_matches(".zip").to_string();
+            let zipped = sheet.finish().and_then(|(png, json)| {
+                let mut zip = anim_export::FramesZip::default();
+                zip.add_file(&format!("{stem}.png"), &png)?;
+                zip.add_file(&format!("{stem}.json"), json.as_bytes())?;
+                zip.finish()
+            });
+            (zipped, "application/zip")
+        }
     };
     state.status = match bytes {
         Ok(bytes) => {
@@ -264,6 +281,10 @@ fn begin(state: &mut AppState) {
             }
         },
         Format::Png => (Sink::Frames(Box::default()), format!("{}_frames.zip", doc.name)),
+        Format::Sheet => {
+            let sheet = anim_export::SheetWriter::new(&job, &format!("{}_sheet.png", doc.name));
+            (Sink::Sheet(Box::new(sheet)), format!("{}_sheet.zip", doc.name))
+        }
     };
     let total = job.poses.len();
     state.pause();
@@ -296,6 +317,20 @@ fn begin(state: &mut AppState) {
         Format::Png => {
             let Some(folder) = rfd::FileDialog::new().set_title("Export frames into…").pick_folder() else { return };
             folder.join(format!("{}_frames", doc.name))
+        }
+        Format::Sheet => {
+            let Some(mut path) = rfd::FileDialog::new()
+                .set_title("Export sprite sheet (a .json file is saved next to it)")
+                .add_filter("PNG", &["png"])
+                .set_file_name(format!("{}_sheet.png", doc.name))
+                .save_file()
+            else {
+                return;
+            };
+            if path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("png")) {
+                path.set_extension("png");
+            }
+            path
         }
     };
     let job = Job {

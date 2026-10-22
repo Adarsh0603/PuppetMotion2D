@@ -22,6 +22,8 @@ pub enum Format {
     Png,
     /// One looping animated GIF.
     Gif,
+    /// Every frame on a grid in one PNG, plus a JSON file describing it.
+    Sheet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -221,6 +223,20 @@ impl Job {
                 }
                 return result;
             }
+            Format::Sheet => {
+                // Nothing is written until every frame is drawn, so a cancel leaves no files.
+                let image_name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let mut sheet = SheetWriter::new(self, &image_name);
+                for i in 0..n {
+                    sheet.add_frame(&self.render_frame(i));
+                    if !progress(i + 1) {
+                        return Ok(Outcome::Cancelled);
+                    }
+                }
+                let (png, json) = sheet.finish()?;
+                std::fs::write(out, png)?;
+                std::fs::write(out.with_extension("json"), json)?;
+            }
         }
         Ok(Outcome::Done(n))
     }
@@ -288,6 +304,93 @@ impl<W: Write> GifWriter<W> {
     }
 }
 
+/// Lays a job's frames out on a grid in one image (a sprite sheet), left to
+/// right then top to bottom, every cell the frame size, and describes it in
+/// JSON: the common "JSON array" layout (each frame's rectangle and its
+/// duration in ms, as Phaser and TexturePacker-style loaders read it), plus
+/// the frame size, columns and fps for engines that slice by grid.
+pub struct SheetWriter {
+    sheet: RgbaImage,
+    frame: [u32; 2],
+    columns: u32,
+    total: usize,
+    fps: f32,
+    image_name: String,
+    count: usize,
+}
+
+impl SheetWriter {
+    /// `image_name` is the PNG's file name, which the JSON points to.
+    pub fn new(job: &Job, image_name: &str) -> Self {
+        let frame = job.output_size();
+        let total = job.poses.len().max(1);
+        // Roughly square: as many columns as rows, or one more.
+        let columns = (total as f32).sqrt().ceil() as u32;
+        let rows = (total as u32).div_ceil(columns);
+        SheetWriter {
+            sheet: RgbaImage::new(frame[0] * columns, frame[1] * rows),
+            frame,
+            columns,
+            total,
+            fps: job.settings.fps.max(1) as f32,
+            image_name: image_name.to_owned(),
+            count: 0,
+        }
+    }
+
+    /// Put the next frame (as rendered by `Job::render_frame`) in its cell.
+    pub fn add_frame(&mut self, image: &RgbaImage) {
+        let (col, row) = (self.count as u32 % self.columns, self.count as u32 / self.columns);
+        image::imageops::replace(&mut self.sheet, image, (col * self.frame[0]) as i64, (row * self.frame[1]) as i64);
+        self.count += 1;
+    }
+
+    /// The sheet as PNG bytes, and its JSON description.
+    pub fn finish(self) -> io::Result<(Vec<u8>, String)> {
+        let mut png = io::Cursor::new(Vec::new());
+        self.sheet.write_to(&mut png, image::ImageFormat::Png).map_err(io::Error::other)?;
+        let [fw, fh] = self.frame;
+        let stem = self.image_name.rsplit_once('.').map_or(self.image_name.as_str(), |(s, _)| s);
+        // Whole milliseconds per frame, rounded as a running total so the overall speed stays right.
+        let ms = |i: usize| (i as f32 * 1000.0 / self.fps).round() as u32;
+        let frames: Vec<String> = (0..self.count)
+            .map(|i| {
+                let (x, y) = (i as u32 % self.columns * fw, i as u32 / self.columns * fh);
+                format!(
+                    "    {{\"filename\": \"{name}_{i}\", \"frame\": {{\"x\": {x}, \"y\": {y}, \"w\": {fw}, \"h\": {fh}}}, \"rotated\": false, \"trimmed\": false, \"spriteSourceSize\": {{\"x\": 0, \"y\": 0, \"w\": {fw}, \"h\": {fh}}}, \"sourceSize\": {{\"w\": {fw}, \"h\": {fh}}}, \"duration\": {d}}}",
+                    name = json_escape(stem),
+                    d = ms(i + 1) - ms(i),
+                )
+            })
+            .collect();
+        let json = format!(
+            "{{\n  \"frames\": [\n{}\n  ],\n  \"meta\": {{\"image\": \"{}\", \"format\": \"RGBA8888\", \"size\": {{\"w\": {}, \"h\": {}}}, \"scale\": \"1\", \"frameWidth\": {fw}, \"frameHeight\": {fh}, \"columns\": {}, \"frameCount\": {}, \"fps\": {}}}\n}}\n",
+            frames.join(",\n"),
+            json_escape(&self.image_name),
+            self.sheet.width(),
+            self.sheet.height(),
+            self.columns,
+            self.total,
+            self.fps,
+        );
+        Ok((png.into_inner(), json))
+    }
+}
+
+/// `s` with the characters JSON strings can't hold as they are escaped.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Collects frames as `frame_0001.png`, `frame_0002.png`, … in a zip, in
 /// memory (for the browser, where frames are downloaded as one file).
 pub struct FramesZip {
@@ -306,11 +409,14 @@ impl FramesZip {
         let mut png = io::Cursor::new(Vec::new());
         image.write_to(&mut png, image::ImageFormat::Png).map_err(io::Error::other)?;
         self.count += 1;
-        // PNGs are already compressed; store them as they are.
+        self.add_file(&format!("frame_{:04}.png", self.count), png.get_ref())
+    }
+
+    /// Add a file as it is (stored, not compressed again).
+    pub fn add_file(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
         let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        self.zip.start_file(format!("frame_{:04}.png", self.count), stored).map_err(io::Error::other)?;
-        self.zip.write_all(png.get_ref())?;
-        Ok(())
+        self.zip.start_file(name, stored).map_err(io::Error::other)?;
+        self.zip.write_all(bytes)
     }
 
     /// The finished zip file's bytes.
@@ -517,6 +623,38 @@ mod tests {
         assert_eq!(j.area(), RectI::from_corners(2 - m, 4 - m, 26 + m, 6 + m));
         let scaled = Job { settings: Settings { scale: 0.5, ..settings }, ..j };
         assert_eq!(scaled.output_size(), [(24 + 2 * m as u32) / 2, (2 + 2 * m as u32) / 2]);
+    }
+
+    #[test]
+    fn sprite_sheet_lays_frames_on_a_grid_with_json() {
+        let dir = std::env::temp_dir().join(format!("anim-export-sheet-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("walk.png");
+        // Frame 0 at rest; frames 1–4 swung half round, so the bar sits left of its pivot.
+        let poses: Vec<Pose> = (0..5).map(|i| {
+            let mut p = Pose::rest(1);
+            p.set_angle(0, if i == 0 { 0.0 } else { PI });
+            p
+        }).collect();
+        let j = job(poses, uncropped(None));
+        let settings = Settings { format: Format::Sheet, ..j.settings };
+        let j = Job { settings, ..j };
+
+        assert_eq!(j.run(&path, |done| done < 2).unwrap(), Outcome::Cancelled);
+        assert!(!path.exists(), "a cancelled sheet writes nothing");
+
+        assert_eq!(j.run(&path, |_| true).unwrap(), Outcome::Done(5));
+        // 5 frames of 10×10: 3 columns, 2 rows.
+        let sheet = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(sheet.dimensions(), (30, 20));
+        assert_eq!(sheet.get_pixel(3, 4).0, [255, 0, 0, 255], "frame 0 in the first cell");
+        assert_eq!(sheet.get_pixel(10 + 3, 4).0[3], 0, "frame 1 has moved");
+        assert_eq!(sheet.get_pixel(10, 15).0, [255, 0, 0, 255], "frame 4 starts the second row");
+        let json = std::fs::read_to_string(dir.join("walk.json")).unwrap();
+        assert!(json.contains("\"image\": \"walk.png\""));
+        assert!(json.contains("\"filename\": \"walk_4\", \"frame\": {\"x\": 10, \"y\": 10, \"w\": 10, \"h\": 10}"));
+        assert!(json.contains("\"duration\": 100") && json.contains("\"columns\": 3") && json.contains("\"fps\": 10"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
