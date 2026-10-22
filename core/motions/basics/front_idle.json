@@ -1,7 +1,11 @@
 {
   "name": "Idle",
+  "category": "Basics",
+  "order": 1,
   "template": "Person (front)",
   "duration": 2.0,
+  "loop": true,
+  "source": "generate.py",
   "rest": {"torso": -90, "head": -90, "left thigh": 90, "left shin": 90, "left upper arm": 90, "left forearm": 90, "right thigh": 90, "right shin": 90, "right upper arm": 90, "right forearm": 90},
   "tracks": {
     "torso": [[0, 0], [2.0, 0]],

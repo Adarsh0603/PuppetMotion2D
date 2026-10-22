@@ -4,6 +4,7 @@
 
 mod canvas;
 mod export;
+mod motions;
 mod panel;
 mod paths;
 mod platform;

@@ -1,0 +1,25 @@
+{
+  "name": "Crouch",
+  "category": "Basics",
+  "order": 2,
+  "template": "Person (side)",
+  "duration": 1.6,
+  "loop": true,
+  "source": "generate.py",
+  "rest": {"torso": -90, "head": -90, "near thigh": 90, "near shin": 90, "near upper arm": 90, "near forearm": 90, "far thigh": 90, "far shin": 90, "far upper arm": 90, "far forearm": 90, "near foot": 0, "far foot": 0},
+  "tracks": {
+    "torso": [[0, 30], [0.8, 33], [1.6, 30]],
+    "near upper arm": [[0, -65], [0.8, -71.0], [1.6, -65.0]],
+    "near forearm": [[0, -45], [0.8, -50], [1.6, -45]],
+    "far upper arm": [[0, -55], [0.8, -61.0], [1.6, -55.0]],
+    "far forearm": [[0, -50], [0.8, -55], [1.6, -50]],
+    "near thigh": [[0, -85], [0.8, -90.0], [1.6, -85.0]],
+    "far thigh": [[0, -65], [0.8, -70.0], [1.6, -65.0]],
+    "near shin": [[0, 95], [0.8, 98], [1.6, 95]],
+    "far shin": [[0, 100], [0.8, 103], [1.6, 100]],
+    "near foot": [[0, -40], [0.8, -40], [1.6, -40]],
+    "far foot": [[0, -40], [0.8, -40], [1.6, -40]],
+    "head": [[0, -25], [0.8, -27], [1.6, -25]]
+  },
+  "bob": [[0, 0.1297], [0.8, 0.1377], [1.6, 0.1297]]
+}

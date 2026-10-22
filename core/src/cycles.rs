@@ -14,29 +14,37 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::f32::consts::{PI, TAU};
 
-/// The cycles that come with the app, in menu order.
-const BUILTIN: [&str; 8] = [
-    include_str!("../motions/side_idle.json"),
-    include_str!("../motions/side_walk.json"),
-    include_str!("../motions/side_run.json"),
-    include_str!("../motions/side_jump.json"),
-    include_str!("../motions/side_punch.json"),
-    include_str!("../motions/front_idle.json"),
-    include_str!("../motions/front_wave.json"),
-    include_str!("../motions/front_jump.json"),
-];
+// `BUILTIN`: every file under `core/motions/`, listed by `build.rs`.
+include!(concat!(env!("OUT_DIR"), "/motions.rs"));
 
 /// Share of a cycle's tracks the skeleton must have for the cycle to be offered.
 const MATCH_SHARE: f32 = 0.75;
 
+/// The groups motions are shown in, in order. A motion with another category
+/// is shown after these, under its own heading.
+pub const CATEGORIES: [&str; 6] = ["Basics", "Move", "Jump", "Combat", "Reactions", "Emotes"];
+
+/// Category of a motion that doesn't name one.
+pub const DEFAULT_CATEGORY: &str = "Other";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Cycle {
     pub name: String,
+    /// The group it's listed under (see `CATEGORIES`).
+    #[serde(default = "default_category")]
+    pub category: String,
+    /// Place within its group, lowest first (then by name).
+    #[serde(default)]
+    pub order: i32,
     /// The template it was made for (a hint; matching goes by bone names).
     #[serde(default)]
     pub template: String,
-    /// Length in seconds; the last keys usually equal the first so it loops.
+    /// Length in seconds.
     pub duration: f32,
+    /// Plays over and over (walk, idle), or once (hurt, an attack). A loop's
+    /// last keys equal its first.
+    #[serde(default = "yes", rename = "loop")]
+    pub looping: bool,
     /// Neutral direction of each bone in degrees (0 = right, 90 = down), for a
     /// figure facing right. Bones not listed keep the angle they're drawn at.
     #[serde(default)]
@@ -60,9 +68,27 @@ fn is_smooth(e: &Ease) -> bool {
     *e == Ease::Smooth
 }
 
-/// The cycles that come with the app.
+fn default_category() -> String {
+    DEFAULT_CATEGORY.into()
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The cycles that come with the app, in menu order.
 pub fn builtin_cycles() -> Vec<Cycle> {
-    BUILTIN.iter().map(|json| Cycle::from_json(json).expect("built-in cycle is valid")).collect()
+    let mut all: Vec<Cycle> = BUILTIN.iter().map(|json| Cycle::from_json(json).expect("built-in cycle is valid")).collect();
+    sort(&mut all);
+    all
+}
+
+/// Put motions in menu order: by category (`CATEGORIES` first), then `order`, then name.
+pub fn sort(cycles: &mut [Cycle]) {
+    let rank = |c: &Cycle| CATEGORIES.iter().position(|k| *k == c.category).unwrap_or(CATEGORIES.len());
+    cycles.sort_by(|a, b| {
+        (rank(a), &a.category, a.order, a.name.to_lowercase()).cmp(&(rank(b), &b.category, b.order, b.name.to_lowercase()))
+    });
 }
 
 impl Cycle {
@@ -71,6 +97,9 @@ impl Cycle {
         let c: Cycle = serde_json::from_str(text).map_err(|e| e.to_string())?;
         if c.name.trim().is_empty() {
             return Err("the motion has no name".into());
+        }
+        if c.category.trim().is_empty() {
+            return Err(format!("\"{}\" has an empty category", c.name));
         }
         if !(c.duration.is_finite() && c.duration > 0.0) {
             return Err("the motion's length must be more than 0 seconds".into());
@@ -123,6 +152,45 @@ impl Cycle {
         motion.offset_y = offset(&self.bob, figure_h);
         motion.offset_x = offset(&self.sway, flip * figure_h);
         motion
+    }
+
+    /// A motion made on this character, saved so it can be put on others.
+    /// The way `skel` is drawn becomes the neutral pose, so the motion comes
+    /// back unchanged here, and on another drawing it's first turned from
+    /// that drawing's pose to this one's.
+    pub fn from_motion(name: &str, category: &str, motion: &Motion, skel: &Skeleton, figure_h: f32, facing_left: bool, looping: bool) -> Cycle {
+        let flip = if facing_left { -1.0 } else { 1.0 };
+        let round = |v: f32, places: f32| (v * places).round() / places;
+        let rest = (0..skel.parts.len())
+            .map(|p| {
+                let (pivot, tip) = skel.bone(p);
+                let drawn = (tip[1] - pivot[1]).atan2(tip[0] - pivot[0]);
+                let facing_right = if facing_left { PI - drawn } else { drawn };
+                (skel.parts[p].name.clone(), round(wrap(facing_right).to_degrees(), 100.0))
+            })
+            .collect();
+        let keys = |keys: &[Key], scale: f32| -> Vec<CycleKey> {
+            keys.iter().map(|k| CycleKey(round(k.t, 1e4), round(k.value * scale, 1e4), k.ease)).collect()
+        };
+        let tracks = motion
+            .tracks
+            .iter()
+            .filter(|(_, k)| !k.is_empty())
+            .map(|(n, k)| (n.clone(), keys(k, flip * 180.0 / PI)))
+            .collect();
+        let h = figure_h.max(1.0);
+        Cycle {
+            name: name.trim().to_string(),
+            category: category.trim().to_string(),
+            order: 0,
+            template: String::new(),
+            duration: motion.duration,
+            looping,
+            rest,
+            tracks,
+            bob: keys(&motion.offset_y, 1.0 / h),
+            sway: keys(&motion.offset_x, flip / h),
+        }
     }
 
     /// For each part, the local angle that turns it from the way it's drawn to
@@ -201,8 +269,48 @@ mod tests {
                 let (Some(first), Some(last)) = (keys.first(), keys.last()) else { continue };
                 assert_eq!(first.0, 0.0, "{} / {name} starts at 0", c.name);
                 assert!((last.0 - c.duration).abs() < 1e-3, "{} / {name} ends at the end", c.name);
-                assert!((first.1 - last.1).abs() < 1e-3, "{} / {name} loops", c.name);
+                if c.looping {
+                    assert!((first.1 - last.1).abs() < 1e-3, "{} / {name} loops", c.name);
+                }
             }
+        }
+    }
+
+    #[test]
+    fn builtins_are_grouped_in_menu_order() {
+        let all = builtin_cycles();
+        let rank = |c: &Cycle| CATEGORIES.iter().position(|k| *k == c.category).expect("a known category");
+        assert!(all.windows(2).all(|w| rank(&w[0]) <= rank(&w[1])));
+        let mut names: Vec<(String, String)> = all.iter().map(|c| (c.template.clone(), c.name.clone())).collect();
+        names.dedup();
+        assert_eq!(names.len(), all.len(), "no two built-ins share a template and a name");
+    }
+
+    #[test]
+    fn a_saved_motion_comes_back_the_same_and_fits_other_drawings() {
+        let side = template("Person (side)");
+        let bbox = RectI::new(0, 0, 100, 200);
+        let walk = builtin_cycles().into_iter().find(|c| c.name == "Walk").unwrap();
+        for facing_left in [false, true] {
+            let t = if facing_left { side.mirrored() } else { side.clone() };
+            let mut skel = t.fit(bbox);
+            skel.joints[4].pos[0] += 15.0; // a drawing that isn't in the template's pose
+            let made = walk.to_motion(&skel, 200.0, 24, facing_left);
+            let saved = Cycle::from_motion(" My walk ", "Move", &made, &skel, 200.0, facing_left, true);
+            assert_eq!((saved.name.as_str(), saved.category.as_str()), ("My walk", "Move"));
+            let saved = Cycle::from_json(&saved.to_json()).unwrap();
+            let back = saved.to_motion(&skel, 200.0, 24, facing_left);
+            for (name, keys) in &made.tracks {
+                for (a, b) in keys.iter().zip(&back.tracks[name]) {
+                    assert!((a.t - b.t).abs() < 1e-3 && (a.value - b.value).abs() < 1e-3, "{name} unchanged");
+                }
+            }
+            for (a, b) in made.offset_y.iter().zip(&back.offset_y) {
+                assert!((a.value - b.value).abs() < 1e-2);
+            }
+            // On the template's own pose, it's turned by the difference again.
+            let other = saved.to_motion(&t.fit(bbox), 200.0, 24, facing_left);
+            assert_eq!(other.tracks.len(), made.tracks.len());
         }
     }
 
