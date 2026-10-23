@@ -61,7 +61,7 @@ def main():
         os.makedirs(folder, exist_ok=True)
         for i, m in enumerate(mod.MOTIONS):
             m = {**m, "category": category, "order": i, "source": SOURCE}
-            view = "side" if "side" in m["template"] else "front"
+            view = {"Person (side)": "side", "Person (front)": "front"}.get(m["template"]) or slug(m["template"])
             path = os.path.join(folder, f"{view}_{slug(m['name'])}.json")
             if path in written:
                 sys.exit(f"two motions would both be written to {path}")

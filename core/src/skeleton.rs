@@ -435,7 +435,7 @@ pub fn part_labels(fg: &Mask, dt: &[f32], bbox: Option<RectI>, skel: &Skeleton, 
     let cut_at_tip: Vec<bool> = skel.parts.iter().map(|p| skel.parts.iter().any(|q| q.pivot == p.tip)).collect();
     let (x0, x1) = (bb.x.max(0) as usize, (bb.right().max(0) as usize).min(w));
     let rows = bb.y.max(0) as usize..(bb.bottom().max(0) as usize).min(h);
-    crate::par::for_rows(labels, w, rows, |y, row| {
+    crate::par::for_rows(labels, w, rows.clone(), |y, row| {
         // Each bone's distance once per pixel: capsule edge, and the cost with the joint cuts.
         let mut capsule = vec![0.0f32; bones.len()];
         let mut cost = vec![0.0f32; bones.len()];
@@ -458,7 +458,125 @@ pub fn part_labels(fg: &Mask, dt: &[f32], bbox: Option<RectI>, skel: &Skeleton, 
             *out = best as u16;
         }
     });
+    // A piece handed over can leave the receiver's own stray bit next to it; a few rounds settle it.
+    for _ in 0..3 {
+        if !absorb_strays(labels, w, x0..x1, rows.clone(), skel.parts.len()) {
+            break;
+        }
+    }
     radii
+}
+
+/// Give each stray piece of a part to the neighbour it borders most. Where a
+/// limb bends, the wedge on the outside of the bend lies past both bones'
+/// joint cuts, so it goes to some other bone (a tail's wedges to the body)
+/// and is left behind, cut loose, when the limb moves. Pieces touching only
+/// the background are kept (a separate blob of drawing), and so are big ones
+/// (over a quarter of the part's main piece: a torso split by an arm drawn
+/// across it). Only the box `xs` × `rows` is looked at. Works on runs of
+/// equal labels along each row, so it stays quick on big drawings. Returns
+/// whether anything changed.
+fn absorb_strays(labels: &mut [u16], w: usize, xs: std::ops::Range<usize>, rows: std::ops::Range<usize>, parts: usize) -> bool {
+    struct Run {
+        y: usize,
+        x0: usize,
+        x1: usize,
+        label: u16,
+    }
+    let mut runs: Vec<Run> = Vec::new();
+    // Where each row's runs start in `runs` (one extra entry at the end).
+    let mut row_start = Vec::with_capacity(rows.len() + 1);
+    for y in rows.clone() {
+        row_start.push(runs.len());
+        let row = &labels[y * w..(y + 1) * w];
+        let mut x = xs.start;
+        while x < xs.end {
+            let label = row[x];
+            let x0 = x;
+            while x < xs.end && row[x] == label {
+                x += 1;
+            }
+            if label != NO_PART && (label as usize) < parts {
+                runs.push(Run { y, x0, x1: x, label });
+            }
+        }
+    }
+    row_start.push(runs.len());
+
+    // Join runs into pieces: touching runs on neighbouring rows with the same label.
+    let mut parent: Vec<usize> = (0..runs.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    // Each pair of overlapping runs on rows r and r + 1 (the overlap's length).
+    let mut overlaps: Vec<(usize, usize, usize)> = Vec::new();
+    for r in 0..rows.len().saturating_sub(1) {
+        let (above, below) = (row_start[r]..row_start[r + 1], row_start[r + 1]..row_start[r + 2]);
+        let (mut a, mut b) = (above.start, below.start);
+        while a < above.end && b < below.end {
+            let lo = runs[a].x0.max(runs[b].x0);
+            let hi = runs[a].x1.min(runs[b].x1);
+            if lo < hi {
+                overlaps.push((a, b, hi - lo));
+            }
+            if runs[a].x1 < runs[b].x1 { a += 1 } else { b += 1 }
+        }
+    }
+    for &(a, b, _) in &overlaps {
+        if runs[a].label == runs[b].label {
+            let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+            parent[ra] = rb;
+        }
+    }
+    let mut size = vec![0usize; runs.len()];
+    for (i, run) in runs.iter().enumerate() {
+        let root = find(&mut parent, i);
+        size[root] += run.x1 - run.x0;
+    }
+    let mut main = vec![0usize; parts];
+    for i in 0..runs.len() {
+        if parent[i] == i {
+            let part = runs[i].label as usize;
+            main[part] = main[part].max(size[i]);
+        }
+    }
+    let stray = |root: usize| size[root] * 4 <= main[runs[root].label as usize];
+
+    // Count each stray piece's border with every other part.
+    let mut votes: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    let mut vote = |parent: &mut [usize], from: usize, to: usize, n: usize| {
+        let root = find(parent, from);
+        if runs[from].label != runs[to].label && stray(root) {
+            votes.entry(root).or_insert_with(|| vec![0; parts])[runs[to].label as usize] += n;
+        }
+    };
+    for &(a, b, n) in &overlaps {
+        vote(&mut parent, a, b, n);
+        vote(&mut parent, b, a, n);
+    }
+    for r in 0..rows.len() {
+        for i in row_start[r]..row_start[r + 1].saturating_sub(1) {
+            if runs[i].x1 == runs[i + 1].x0 {
+                vote(&mut parent, i, i + 1, 1);
+                vote(&mut parent, i + 1, i, 1);
+            }
+        }
+    }
+    if votes.is_empty() {
+        return false;
+    }
+    let winner: std::collections::HashMap<usize, u16> =
+        votes.into_iter().map(|(root, v)| (root, (0..parts).max_by_key(|&p| v[p]).unwrap_or(0) as u16)).collect();
+    for (i, &Run { y, x0, x1, .. }) in runs.iter().enumerate() {
+        if let Some(&to) = winner.get(&find(&mut parent, i)) {
+            labels[y * w + x0..y * w + x1].fill(to);
+        }
+    }
+    true
 }
 
 /// Index of the smallest value (the first one, on a tie).
@@ -490,6 +608,31 @@ mod tests {
                 m.set(x, y, true);
             }
         }
+    }
+
+    #[test]
+    fn stray_pieces_join_the_part_around_them() {
+        // 20 × 10: part 0 on the left, part 1 on the right, background in the last row.
+        let (w, h) = (20, 10);
+        let mut l = vec![NO_PART; w * h];
+        for y in 0..9 {
+            for x in 0..w {
+                l[y * w + x] = if x < 10 { 0 } else { 1 };
+            }
+        }
+        l[2 * w + 15] = 0; // a speck of part 0 inside part 1: a wedge left behind
+        l[9 * w + 3] = 1; // part 1 alone on the background: a separate blob, kept
+        // A big piece of part 1 cut off inside part 0 stays too (over a quarter of its main piece).
+        for y in 0..9 {
+            for x in 0..4 {
+                l[y * w + x] = 1;
+            }
+        }
+        assert!(absorb_strays(&mut l, w, 0..w, 0..h, 2));
+        assert_eq!(l[2 * w + 15], 1, "the speck joins the part around it");
+        assert_eq!(l[9 * w + 3], 1, "a piece touching only background stays");
+        assert_eq!(l[w + 1], 1, "a big piece stays");
+        assert!(!absorb_strays(&mut l, w, 0..w, 0..h, 2), "nothing left to move");
     }
 
     #[test]

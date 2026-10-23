@@ -116,6 +116,9 @@ impl App {
         if pressed(ctx, Modifiers::COMMAND, Key::O) {
             self.state.request_open_dialog(ctx);
         }
+        if pressed(ctx, Modifiers::COMMAND, Key::N) {
+            self.state.request_new();
+        }
         if self.state.step == state::Step::Animate {
             self.key_shortcuts(ctx);
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::B)) {

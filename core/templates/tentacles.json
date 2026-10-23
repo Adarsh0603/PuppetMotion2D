@@ -1,0 +1,336 @@
+{
+  "name": "Tentacles",
+  "joints": [
+    {
+      "name": "head base",
+      "at": [
+        0.5,
+        0.4741
+      ]
+    },
+    {
+      "name": "head top",
+      "at": [
+        0.5,
+        0.0323
+      ]
+    },
+    {
+      "name": "tentacle 1 base",
+      "at": [
+        0.3142,
+        0.53
+      ]
+    },
+    {
+      "name": "tentacle 1 bend",
+      "at": [
+        0.2369,
+        0.6179
+      ]
+    },
+    {
+      "name": "tentacle 1 curl",
+      "at": [
+        0.1391,
+        0.6792
+      ]
+    },
+    {
+      "name": "tentacle 1 end",
+      "at": [
+        0.0285,
+        0.6644
+      ]
+    },
+    {
+      "name": "tentacle 2 base",
+      "at": [
+        0.6858,
+        0.53
+      ]
+    },
+    {
+      "name": "tentacle 2 bend",
+      "at": [
+        0.7631,
+        0.6179
+      ]
+    },
+    {
+      "name": "tentacle 2 curl",
+      "at": [
+        0.8609,
+        0.6792
+      ]
+    },
+    {
+      "name": "tentacle 2 end",
+      "at": [
+        0.9715,
+        0.6644
+      ]
+    },
+    {
+      "name": "tentacle 3 base",
+      "at": [
+        0.3986,
+        0.5417
+      ]
+    },
+    {
+      "name": "tentacle 3 bend",
+      "at": [
+        0.351,
+        0.6753
+      ]
+    },
+    {
+      "name": "tentacle 3 curl",
+      "at": [
+        0.2819,
+        0.798
+      ]
+    },
+    {
+      "name": "tentacle 3 end",
+      "at": [
+        0.148,
+        0.8846
+      ]
+    },
+    {
+      "name": "tentacle 4 base",
+      "at": [
+        0.6014,
+        0.5417
+      ]
+    },
+    {
+      "name": "tentacle 4 bend",
+      "at": [
+        0.649,
+        0.6753
+      ]
+    },
+    {
+      "name": "tentacle 4 curl",
+      "at": [
+        0.7181,
+        0.798
+      ]
+    },
+    {
+      "name": "tentacle 4 end",
+      "at": [
+        0.852,
+        0.8846
+      ]
+    },
+    {
+      "name": "tentacle 5 base",
+      "at": [
+        0.4999,
+        0.5453
+      ]
+    },
+    {
+      "name": "tentacle 5 bend",
+      "at": [
+        0.4961,
+        0.6874
+      ]
+    },
+    {
+      "name": "tentacle 5 curl",
+      "at": [
+        0.4744,
+        0.8277
+      ]
+    },
+    {
+      "name": "tentacle 5 end",
+      "at": [
+        0.3949,
+        0.9698
+      ]
+    }
+  ],
+  "bones": [
+    {
+      "name": "head",
+      "from": "head base",
+      "to": "head top",
+      "limit": [
+        -30.0,
+        30.0
+      ],
+      "layer": 16
+    },
+    {
+      "name": "tentacle 1",
+      "from": "tentacle 1 base",
+      "to": "tentacle 1 bend",
+      "parent": "head",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 1
+    },
+    {
+      "name": "tentacle 1 middle",
+      "from": "tentacle 1 bend",
+      "to": "tentacle 1 curl",
+      "parent": "tentacle 1",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 2
+    },
+    {
+      "name": "tentacle 1 tip",
+      "from": "tentacle 1 curl",
+      "to": "tentacle 1 end",
+      "parent": "tentacle 1 middle",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 3
+    },
+    {
+      "name": "tentacle 2",
+      "from": "tentacle 2 base",
+      "to": "tentacle 2 bend",
+      "parent": "head",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 4
+    },
+    {
+      "name": "tentacle 2 middle",
+      "from": "tentacle 2 bend",
+      "to": "tentacle 2 curl",
+      "parent": "tentacle 2",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 5
+    },
+    {
+      "name": "tentacle 2 tip",
+      "from": "tentacle 2 curl",
+      "to": "tentacle 2 end",
+      "parent": "tentacle 2 middle",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 6
+    },
+    {
+      "name": "tentacle 3",
+      "from": "tentacle 3 base",
+      "to": "tentacle 3 bend",
+      "parent": "head",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 7
+    },
+    {
+      "name": "tentacle 3 middle",
+      "from": "tentacle 3 bend",
+      "to": "tentacle 3 curl",
+      "parent": "tentacle 3",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 8
+    },
+    {
+      "name": "tentacle 3 tip",
+      "from": "tentacle 3 curl",
+      "to": "tentacle 3 end",
+      "parent": "tentacle 3 middle",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 9
+    },
+    {
+      "name": "tentacle 4",
+      "from": "tentacle 4 base",
+      "to": "tentacle 4 bend",
+      "parent": "head",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 10
+    },
+    {
+      "name": "tentacle 4 middle",
+      "from": "tentacle 4 bend",
+      "to": "tentacle 4 curl",
+      "parent": "tentacle 4",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 11
+    },
+    {
+      "name": "tentacle 4 tip",
+      "from": "tentacle 4 curl",
+      "to": "tentacle 4 end",
+      "parent": "tentacle 4 middle",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 12
+    },
+    {
+      "name": "tentacle 5",
+      "from": "tentacle 5 base",
+      "to": "tentacle 5 bend",
+      "parent": "head",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 13
+    },
+    {
+      "name": "tentacle 5 middle",
+      "from": "tentacle 5 bend",
+      "to": "tentacle 5 curl",
+      "parent": "tentacle 5",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 14
+    },
+    {
+      "name": "tentacle 5 tip",
+      "from": "tentacle 5 curl",
+      "to": "tentacle 5 end",
+      "parent": "tentacle 5 middle",
+      "limit": [
+        -70.0,
+        70.0
+      ],
+      "layer": 15
+    }
+  ]
+}

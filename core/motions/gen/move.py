@@ -93,4 +93,6 @@ def dash():
     return motion("Dash", SIDE, 0.6, tr, bob, loop=False)
 
 
-MOTIONS = [walk(), run(), crouch_walk(), sneak(), push(), dash()]
+from . import creatures
+
+MOTIONS = [walk(), run(), crouch_walk(), sneak(), push(), dash()] + creatures.MOVE

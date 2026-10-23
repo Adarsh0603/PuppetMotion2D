@@ -21,6 +21,15 @@ FRONT_REST = {
 }
 
 
+FOUR_LEGS_REST = {
+    "body": 0,
+    **{f"{s} {e} {b}": 90 for s in ("near", "far") for e in ("front", "back") for b in ("leg", "shin")},
+}
+# Neutral direction per bone (0 = right, 90 = down) for a figure facing right.
+# Bones left out keep the angle they're drawn at (tails, tentacles, blobs).
+REST = {SIDE: SIDE_REST, FRONT: FRONT_REST, "Four legs (side)": FOUR_LEGS_REST}
+
+
 def interp(keys, t):
     """Value of a key list at time t (straight lines between keys)."""
     keys = sorted(keys)
@@ -135,6 +144,6 @@ def side_pose(times, torso, near=None, far=None, legs=None, ground=False):
 def motion(name, template, duration, tracks, bob=None, sway=None, loop=True):
     """One motion, as written to JSON. `bob` (down +) and `sway` (forward +) are
     shares of the figure's height."""
-    rest = SIDE_REST if template == SIDE else FRONT_REST
+    rest = REST.get(template, {})
     return {"name": name, "template": template, "duration": duration, "loop": loop, "rest": rest,
             "tracks": tracks, "bob": bob or [], "sway": sway or []}

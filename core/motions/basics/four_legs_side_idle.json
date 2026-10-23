@@ -1,0 +1,18 @@
+{
+  "name": "Idle",
+  "category": "Basics",
+  "order": 7,
+  "template": "Four legs (side)",
+  "duration": 2.4,
+  "loop": true,
+  "source": "generate.py",
+  "rest": {"body": 0, "near front leg": 90, "near front shin": 90, "near back leg": 90, "near back shin": 90, "far front leg": 90, "far front shin": 90, "far back leg": 90, "far back shin": 90},
+  "tracks": {
+    "body": [[0.0, 0], [0.6, -1], [1.2, 0], [1.8, 1], [2.4, 0]],
+    "head": [[0.0, 0], [0.4, -6], [0.8, -6], [1.2, 0], [1.6, 4], [2.0, 4], [2.4, 0]],
+    "tail": [[0.0, 10], [0.6, 0], [1.2, -10], [1.8, 0], [2.4, 10]],
+    "tail middle": [[0.0, 6.0], [0.24, 10], [0.84, 0], [1.44, -10], [2.04, 0], [2.4, 6.0]],
+    "tail tip": [[0.0, 2.0], [0.48, 10], [1.08, 0], [1.68, -10], [2.28, 0], [2.4, 2.0]]
+  },
+  "bob": [[0.0, 0], [0.6, 0.004], [1.2, 0], [1.8, 0.004], [2.4, 0]]
+}

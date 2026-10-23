@@ -95,4 +95,6 @@ def talk_front():
     return motion("Talk", FRONT, d, tr)
 
 
-MOTIONS = [idle_side(), idle_front(), crouch_side(), talk_side(), talk_front(), sit_side(), doze_side()]
+from . import creatures
+
+MOTIONS = [idle_side(), idle_front(), crouch_side(), talk_side(), talk_front(), sit_side(), doze_side()] + creatures.BASICS

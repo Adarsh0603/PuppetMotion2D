@@ -29,6 +29,10 @@ pub enum Pending {
     Open(PathBuf),
     /// A file given by contents (dropped in the browser, or picked there).
     OpenBytes(String, Vec<u8>),
+    /// One of the built-in sample drawings (by number).
+    OpenSample(usize),
+    /// Close the drawing and go back to the empty start screen.
+    New,
 }
 
 /// A recovery copy found at startup.
@@ -146,7 +150,8 @@ pub fn show_prompt(ctx: &egui::Context, state: &mut AppState) {
     let name = state.doc.as_ref().map_or_else(String::new, |d| d.name.clone());
     let action = match pending {
         Pending::Close => "before closing",
-        Pending::OpenDialog | Pending::Open(_) | Pending::OpenBytes(..) => "before opening another file",
+        Pending::OpenDialog | Pending::Open(_) | Pending::OpenBytes(..) | Pending::OpenSample(_) => "before opening another file",
+        Pending::New => "before starting a new one",
     };
     let mut choice = None;
     let modal = egui::Modal::new(egui::Id::unique("save prompt")).show(ctx, |ui| {
@@ -205,6 +210,8 @@ fn proceed(ctx: &egui::Context, state: &mut AppState, pending: Pending) {
         Pending::OpenDialog => state.open_dialog(ctx),
         Pending::Open(path) => state.open(ctx, &path),
         Pending::OpenBytes(name, bytes) => state.open_bytes(ctx, &name, bytes, None),
+        Pending::OpenSample(i) => state.open_sample(ctx, i),
+        Pending::New => state.close_doc(),
     }
 }
 
@@ -288,6 +295,28 @@ mod tests {
         state.open(&egui::Context::default(), &path);
         assert!(state.doc.is_some(), "{}", state.status);
         state
+    }
+
+    #[test]
+    fn new_and_samples_ask_first_with_unsaved_changes() {
+        let dir = temp_dir("new");
+        let mut state = open_sample(&dir);
+        let ctx = egui::Context::default();
+
+        state.key_all();
+        state.request_new();
+        assert_eq!(state.unsaved.prompt, Some(Pending::New));
+        assert!(state.doc.is_some(), "still open until answered");
+        state.request_sample(&ctx, 1);
+        assert_eq!(state.unsaved.prompt, Some(Pending::OpenSample(1)));
+
+        // "Don't save" then carries on: the fox opens, and New empties the window.
+        state.unsaved.prompt = None;
+        proceed(&ctx, &mut state, Pending::OpenSample(1));
+        assert_eq!(state.doc.as_ref().unwrap().name, "fox");
+        state.request_new();
+        assert!(state.doc.is_none() && state.unsaved.prompt.is_none(), "a clean drawing closes at once");
+        assert_eq!(state.step, crate::state::Step::Review);
     }
 
     #[test]

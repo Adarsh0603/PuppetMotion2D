@@ -1,0 +1,289 @@
+{
+  "name": "Four legs (side)",
+  "joints": [
+    {
+      "name": "hips",
+      "at": [
+        0.3353,
+        0.5242
+      ]
+    },
+    {
+      "name": "shoulders",
+      "at": [
+        0.6959,
+        0.51
+      ]
+    },
+    {
+      "name": "far back hip",
+      "at": [
+        0.2982,
+        0.6382
+      ]
+    },
+    {
+      "name": "far back knee",
+      "at": [
+        0.2632,
+        0.7664
+      ]
+    },
+    {
+      "name": "far back paw",
+      "at": [
+        0.2904,
+        0.9573
+      ]
+    },
+    {
+      "name": "far front hip",
+      "at": [
+        0.6491,
+        0.6524
+      ]
+    },
+    {
+      "name": "far front knee",
+      "at": [
+        0.6413,
+        0.7806
+      ]
+    },
+    {
+      "name": "far front paw",
+      "at": [
+        0.6608,
+        0.9573
+      ]
+    },
+    {
+      "name": "tail base",
+      "at": [
+        0.2671,
+        0.4957
+      ]
+    },
+    {
+      "name": "tail bend",
+      "at": [
+        0.1462,
+        0.433
+      ]
+    },
+    {
+      "name": "tail curve",
+      "at": [
+        0.0838,
+        0.302
+      ]
+    },
+    {
+      "name": "tail end",
+      "at": [
+        0.0702,
+        0.0684
+      ]
+    },
+    {
+      "name": "near back hip",
+      "at": [
+        0.3372,
+        0.6439
+      ]
+    },
+    {
+      "name": "near back knee",
+      "at": [
+        0.3158,
+        0.7749
+      ]
+    },
+    {
+      "name": "near back paw",
+      "at": [
+        0.3528,
+        0.9573
+      ]
+    },
+    {
+      "name": "near front hip",
+      "at": [
+        0.6979,
+        0.6581
+      ]
+    },
+    {
+      "name": "near front knee",
+      "at": [
+        0.7037,
+        0.7863
+      ]
+    },
+    {
+      "name": "near front paw",
+      "at": [
+        0.7271,
+        0.9573
+      ]
+    },
+    {
+      "name": "neck",
+      "at": [
+        0.6959,
+        0.4815
+      ]
+    },
+    {
+      "name": "head top",
+      "at": [
+        0.848,
+        0.2393
+      ]
+    }
+  ],
+  "bones": [
+    {
+      "name": "body",
+      "from": "hips",
+      "to": "shoulders",
+      "limit": [
+        -30.0,
+        30.0
+      ],
+      "layer": 7
+    },
+    {
+      "name": "far back leg",
+      "from": "far back hip",
+      "to": "far back knee",
+      "parent": "body",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 0
+    },
+    {
+      "name": "far back shin",
+      "from": "far back knee",
+      "to": "far back paw",
+      "parent": "far back leg",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 1
+    },
+    {
+      "name": "far front leg",
+      "from": "far front hip",
+      "to": "far front knee",
+      "parent": "body",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 2
+    },
+    {
+      "name": "far front shin",
+      "from": "far front knee",
+      "to": "far front paw",
+      "parent": "far front leg",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 3
+    },
+    {
+      "name": "tail",
+      "from": "tail base",
+      "to": "tail bend",
+      "parent": "body",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 4
+    },
+    {
+      "name": "tail middle",
+      "from": "tail bend",
+      "to": "tail curve",
+      "parent": "tail",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 5
+    },
+    {
+      "name": "tail tip",
+      "from": "tail curve",
+      "to": "tail end",
+      "parent": "tail middle",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 6
+    },
+    {
+      "name": "near back leg",
+      "from": "near back hip",
+      "to": "near back knee",
+      "parent": "body",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 8
+    },
+    {
+      "name": "near back shin",
+      "from": "near back knee",
+      "to": "near back paw",
+      "parent": "near back leg",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 9
+    },
+    {
+      "name": "near front leg",
+      "from": "near front hip",
+      "to": "near front knee",
+      "parent": "body",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 10
+    },
+    {
+      "name": "near front shin",
+      "from": "near front knee",
+      "to": "near front paw",
+      "parent": "near front leg",
+      "limit": [
+        -60.0,
+        60.0
+      ],
+      "layer": 11
+    },
+    {
+      "name": "head",
+      "from": "neck",
+      "to": "head top",
+      "parent": "body",
+      "limit": [
+        -40.0,
+        40.0
+      ],
+      "layer": 12
+    }
+  ]
+}

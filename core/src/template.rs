@@ -10,7 +10,13 @@ use crate::skeleton::{Joint, SkelPart, Skeleton};
 use serde::{Deserialize, Serialize};
 
 /// The templates that come with the app, in menu order.
-const BUILTIN: [&str; 2] = [include_str!("../templates/person_front.json"), include_str!("../templates/person_side.json")];
+const BUILTIN: [&str; 5] = [
+    include_str!("../templates/person_front.json"),
+    include_str!("../templates/person_side.json"),
+    include_str!("../templates/four_legs_side.json"),
+    include_str!("../templates/tentacles.json"),
+    include_str!("../templates/blob.json"),
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Template {
@@ -153,7 +159,7 @@ mod tests {
     #[test]
     fn builtins_load_and_fit() {
         let all = builtin();
-        assert_eq!(all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Person (front)", "Person (side)"]);
+        assert_eq!(all.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Person (front)", "Person (side)", "Four legs (side)", "Tentacles", "Blob"]);
         let bbox = RectI::new(10, 20, 100, 200);
         for t in &all {
             let s = t.fit(bbox);

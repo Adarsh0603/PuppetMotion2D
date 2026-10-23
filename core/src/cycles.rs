@@ -217,16 +217,25 @@ impl Cycle {
 }
 
 /// Whether a side-view character faces left, judged by its feet (bones named
-/// "… foot" pointing from ankle to toe). False when it has none, e.g. a front view.
+/// "… foot" pointing from ankle to toe), or for a side view without feet
+/// (near/far limbs, like four legs) by which way the head points. False
+/// otherwise, e.g. a front view.
 pub fn faces_left(skel: &Skeleton) -> bool {
-    let feet: Vec<f32> = (0..skel.parts.len())
-        .filter(|&p| skel.parts[p].name.ends_with("foot"))
-        .map(|p| {
-            let (ankle, toe) = skel.bone(p);
-            toe[0] - ankle[0]
-        })
-        .collect();
-    !feet.is_empty() && feet.iter().sum::<f32>() < 0.0
+    let toward = |pick: &dyn Fn(&str) -> bool| -> Vec<f32> {
+        (0..skel.parts.len())
+            .filter(|&p| pick(&skel.parts[p].name))
+            .map(|p| {
+                let (from, to) = skel.bone(p);
+                to[0] - from[0]
+            })
+            .collect()
+    };
+    let mut dx = toward(&|n| n.ends_with("foot"));
+    let side_view = skel.parts.iter().any(|p| p.name.starts_with("near ") || p.name.starts_with("far "));
+    if dx.is_empty() && side_view {
+        dx = toward(&|n| n == "head");
+    }
+    !dx.is_empty() && dx.iter().sum::<f32>() < 0.0
 }
 
 /// `a` in (-π, π].
@@ -380,6 +389,9 @@ mod tests {
         assert!(!faces_left(&side.fit(bbox)));
         assert!(faces_left(&side.mirrored().fit(bbox)));
         assert!(!faces_left(&template("Person (front)").fit(bbox)));
+        let fox = template("Four legs (side)");
+        assert!(!faces_left(&fox.fit(bbox)), "no feet: the head says right");
+        assert!(faces_left(&fox.mirrored().fit(bbox)));
     }
 
     #[test]

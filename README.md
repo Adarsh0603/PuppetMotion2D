@@ -29,12 +29,12 @@ Free and open source, written in Rust with egui.
 | **Animate** | Pick a ready-made motion, or drag hands and feet to pose; the whole limb follows. Press **K** to keep a pose at a frame, move along the timeline, and pose again. The in-betweens are filled in for you.                       |
 | **Export**  | Preview the result, then save a looping **GIF**, a **sprite sheet** or **PNG frames** for a game engine.                                                                                                                       |
 
-No drawing at hand? Press **Try a sample drawing** on the start screen.
+No drawing at hand? The start screen has four samples to try, each rigged in one click: a hero, a fox, a slime and an octopus.
 
 ## Features
 
 - **Automatic cutout:** works with transparent PNGs and with drawings on plain or slightly textured paper, including sketchy outlines with small gaps. The settings are picked for each drawing, so most need no tuning.
-- **Skeletons:** front and side-view person templates, a free-form bone editor, rotation limits, and saving your own templates.
+- **Skeletons:** templates for people (front and side view), four-legged animals, tentacled creatures and blobs, joints that snap onto the drawing, a free-form bone editor, rotation limits, and saving your own templates.
 - **Posing:** two-bone IK, so dragging a hand bends the elbow. Children follow their parents, and a draw-order list puts the far arm behind the body.
 - **Bending:** the drawing is a mesh that bends smoothly at elbows, knees and other joints, with one softness setting from stiff cut-out to soft and squishy.
 - **Weight brush:** paint where each bone pulls the drawing (Add, Remove, Smooth), for example so hair follows the head. A heat map shows the result as you paint.

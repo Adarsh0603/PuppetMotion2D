@@ -4,7 +4,7 @@ use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
     AnyRig, Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
-    NO_PART, auto_params, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
+    NO_PART, auto_params, snap_joints, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
@@ -38,8 +38,17 @@ const DEFAULT_SOFTNESS: f32 = 0.8;
 /// bending meshes made the old "joint fill" slider unnecessary.
 const JOINT_OVERLAP: f32 = 1.0;
 
-/// A small drawing for trying the app without one of your own.
-const SAMPLE: &[u8] = include_bytes!("../assets/sample.png");
+/// Drawings for trying the app without one of your own: name, image, and
+/// the template that fits it. Remade by `core/examples/make_samples.rs`.
+const SAMPLES: [(&str, &[u8], &str); 4] = [
+    ("Hero", include_bytes!("../assets/samples/hero.png"), "Person (front)"),
+    ("Fox", include_bytes!("../assets/samples/fox.png"), "Four legs (side)"),
+    ("Slime", include_bytes!("../assets/samples/slime.png"), "Blob"),
+    ("Octopus", include_bytes!("../assets/samples/octopus.png"), "Tentacles"),
+];
+
+/// How far snapping may move a joint, as a share of the character's height.
+const SNAP_REACH: f32 = 0.1;
 
 /// Undo steps kept per drawing.
 const UNDO_LIMIT: usize = 200;
@@ -245,6 +254,17 @@ impl Doc {
         self.reset_pose();
         self.recompute_skeleton();
     }
+
+    /// Move the joints onto the middle of the limbs they sit on (see
+    /// `anim_core::snap_joints`). Returns how many moved.
+    pub fn snap_joints(&mut self) -> usize {
+        let reach = SNAP_REACH * self.figure_box().h as f32;
+        let moved = snap_joints(&mut self.skeleton, &self.fg, reach);
+        if moved > 0 {
+            self.recompute_skeleton();
+        }
+        moved
+    }
 }
 
 /// A ready-made motion: a cycle (by name) or one for any skeleton.
@@ -434,6 +454,16 @@ impl AppState {
         }
     }
 
+    /// Open sample `i` from `SAMPLES`, rigged with its own template.
+    pub fn open_sample(&mut self, ctx: &egui::Context, i: usize) {
+        let (name, bytes, template) = SAMPLES[i];
+        if let Some(t) = self.templates.iter().position(|t| t.name == template) {
+            self.template_choice = t;
+            self.facing_left = false;
+        }
+        self.open_bytes(ctx, &format!("{}.png", name.to_lowercase()), bytes.to_vec(), None);
+    }
+
     fn open_image(&mut self, ctx: &egui::Context, name: &str, bytes: Vec<u8>, ext: String) {
         let Some(mut doc) = self.load_doc(ctx, name, bytes, ext, true) else { return };
         // A new drawing bends smoothly by default (an opened project keeps its own setting).
@@ -443,6 +473,11 @@ impl AppState {
             doc.fit_skeleton(&self.facing(t));
         }
         self.set_doc(doc);
+        // Snapping is its own undo step, so Ctrl+Z shows where the template put the joints.
+        self.snap_joints();
+        if let Some(doc) = &mut self.doc {
+            doc.dirty = false;
+        }
         // A new drawing starts at Review, so the cutout can be checked first.
         self.set_step(Step::Review);
     }
@@ -952,6 +987,43 @@ impl AppState {
         }
     }
 
+    /// Open sample `i`, first asking to save if there are unsaved changes.
+    pub fn request_sample(&mut self, ctx: &egui::Context, i: usize) {
+        if self.doc.as_ref().is_some_and(|d| d.dirty) {
+            self.unsaved.prompt = Some(Pending::OpenSample(i));
+        } else {
+            self.open_sample(ctx, i);
+        }
+    }
+
+    /// Close the drawing for the empty start screen, first asking to save if
+    /// there are unsaved changes.
+    pub fn request_new(&mut self) {
+        if self.doc.as_ref().is_some_and(|d| d.dirty) {
+            self.unsaved.prompt = Some(Pending::New);
+        } else {
+            self.close_doc();
+        }
+    }
+
+    /// Back to the empty start screen (Review's Open card).
+    pub fn close_doc(&mut self) {
+        if self.doc.take().is_none() {
+            return;
+        }
+        self.unsaved.clear_recovery();
+        self.playing = false;
+        self.playhead = 0.0;
+        self.key_sel.clear();
+        self.skel_sel = SkelSel::None;
+        self.drag = Drag::None;
+        self.drag_before = None;
+        self.field_before = None;
+        self.last_motion = None;
+        self.step = Step::Review;
+        self.status = "Open a drawing, or try a sample".into();
+    }
+
     /// Show the Open dialog, first asking to save if there are unsaved changes.
     pub fn request_open_dialog(&mut self, ctx: &egui::Context) {
         if self.doc.as_ref().is_some_and(|d| d.dirty) {
@@ -1189,6 +1261,9 @@ impl AppState {
                 ui.label(egui::RichText::new("PuppetMotion 2D").size(16.0).strong());
                 ui.separator();
             }
+            if ui.add_enabled(has_doc, egui::Button::new("New")).on_hover_text("Close this drawing and start again (Ctrl+N)").clicked() {
+                self.request_new();
+            }
             if ui.button("Open…").on_hover_text("A drawing or a project (Ctrl+O)").clicked() {
                 self.request_open_dialog(ui.ctx());
             }
@@ -1275,9 +1350,8 @@ impl AppState {
                     self.request_open_dialog(ui.ctx());
                 }
                 ui.label(egui::RichText::new("Or drop a file on the window. Saved projects (.pm2d) open the same way.").weak());
-                if ui.button("Try a sample drawing").on_hover_text("A simple stick figure, to see every step first").clicked() {
-                    self.open_bytes(ui.ctx(), "sample.png", SAMPLE.to_vec(), None);
-                }
+                ui.add_space(6.0);
+                self.sample_buttons(ui);
             });
             return;
         };
@@ -1290,6 +1364,8 @@ impl AppState {
                 egui::RichText::new("If some background is included, or part of the character is dimmed, fine-tune the cutout.")
                     .weak(),
             );
+            ui.add_space(4.0);
+            self.sample_buttons(ui);
         });
         // Finding the character is slow on big drawings, so a slider applies
         // when it's let go (or typed into), not on every frame of the drag.
@@ -1333,6 +1409,18 @@ impl AppState {
             doc.set_fg(&self.params);
             doc.dirty = true;
         }
+    }
+
+    /// "Try a sample:" and a button per sample drawing.
+    fn sample_buttons(&mut self, ui: &mut egui::Ui) {
+        ui.label("Try a sample:");
+        ui.horizontal_wrapped(|ui| {
+            for (i, (name, _, template)) in SAMPLES.iter().enumerate() {
+                if ui.button(*name).on_hover_text(format!("Opens rigged with the {template} template")).clicked() {
+                    self.request_sample(ui.ctx(), i);
+                }
+            }
+        });
     }
 
     fn animate_section(&mut self, ui: &mut egui::Ui) {
@@ -1535,6 +1623,13 @@ impl AppState {
                 self.edit_skeleton(|s| *s = Skeleton::empty());
             }
         });
+        if ui
+            .button("Snap joints to drawing")
+            .on_hover_text("Move each joint to the middle of the limb it's on (hips and shoulders stay)")
+            .clicked()
+        {
+            self.snap_joints();
+        }
         // Side views: which way the character faces, and which limbs are in front.
         let side_template = self.templates.get(self.template_choice).is_some_and(Template::is_side_view);
         let has_near_far = self.doc.as_ref().is_some_and(|d| d.skeleton.joints.iter().any(|j| j.name.starts_with("near ")));
@@ -1587,6 +1682,19 @@ impl AppState {
         self.template_choice = i;
         self.skel_sel = SkelSel::None;
         self.status = format!("Using the {} template", t.name);
+        self.commit(before);
+        // A separate undo step, so Ctrl+Z shows where the template put the joints.
+        self.snap_joints();
+    }
+
+    /// Move the joints onto the middle of the limbs they sit on (one undo step).
+    pub fn snap_joints(&mut self) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        let moved = doc.snap_joints();
+        if moved > 0 {
+            self.status = format!("Moved {moved} joints onto the middle of the drawing (Ctrl+Z undoes)");
+        }
         self.commit(before);
     }
 
@@ -1832,6 +1940,7 @@ impl AppState {
 fn step_shortcuts(step: Step) -> &'static [(&'static str, &'static str)] {
     match step {
         Step::Review => &[
+            ("Ctrl+N", "New: close the drawing"),
             ("Ctrl+O", "Open a drawing or project"),
             ("Ctrl+S", "Save"),
             ("Drag", "Pan the view"),
@@ -1895,12 +2004,22 @@ mod tests {
     }
 
     #[test]
-    fn sample_drawing_opens_rigged() {
+    fn samples_open_rigged_with_their_templates() {
         let ctx = egui::Context::default();
-        let mut state = AppState::default();
-        state.open_bytes(&ctx, "sample.png", SAMPLE.to_vec(), None);
-        let doc = state.doc.as_ref().expect(&state.status);
-        assert_eq!(parts_in_map(doc), 10, "the template fits and splits the figure");
+        for (i, (name, _, template)) in SAMPLES.iter().enumerate() {
+            let mut state = AppState::default();
+            state.open_sample(&ctx, i);
+            let doc = state.doc.as_ref().expect(&state.status);
+            let bones = state.templates.iter().find(|t| t.name == *template).expect(template).bones.len();
+            assert_eq!(doc.skeleton.parts.len(), bones, "{name} uses {template}");
+            assert_eq!(parts_in_map(doc), bones, "{name}: every bone gets part of the drawing");
+            // No clippings: each part is one piece, so nothing is left behind when it moves.
+            let masks = anim_core::masks_from_labels(&doc.skel_labels, doc.fg.w, doc.fg.h, bones);
+            for (p, m) in masks.iter().enumerate() {
+                let pieces = anim_core::components::label(m).sizes.len();
+                assert_eq!(pieces, 1, "{name}: {} is in {pieces} pieces", doc.skeleton.parts[p].name);
+            }
+        }
     }
 
     /// How many parts the part map uses (highest part number + 1).
@@ -1916,7 +2035,10 @@ mod tests {
     fn skeleton_edits_undo_and_redo() {
         let mut state = open_sample();
         assert_eq!(bone_count(&state), 10, "starts with the person template");
+        // Opening snaps the joints as one undo step, and nothing before it.
+        state.undo();
         assert!(!state.doc.as_ref().unwrap().history.can_undo());
+        state.redo();
 
         // Grow a tail from the pelvis (joint 2), then delete the head bone.
         state.edit_skeleton(|s| {
@@ -1932,7 +2054,9 @@ mod tests {
         assert_eq!(bone_count(&state), 11, "head is back");
         state.undo();
         assert_eq!(bone_count(&state), 10, "tail is gone");
-        assert!(!state.doc.as_ref().unwrap().history.can_undo());
+        state.undo();
+        assert!(!state.doc.as_ref().unwrap().history.can_undo(), "only the snap on opening is left");
+        state.redo();
 
         state.redo();
         state.redo();
@@ -2289,8 +2413,14 @@ mod tests {
         let skel = &state.doc.as_ref().unwrap().skeleton;
         assert!(skel.parts.iter().any(|p| p.name == "near foot"));
         assert_eq!(skel.parts[skel.paint_order()[0]].name, "far upper arm");
+        // Undo goes back to where the template put the joints, then to the old template.
+        let snapped = skel.clone();
+        state.undo();
+        let fitted = &state.doc.as_ref().unwrap().skeleton;
+        assert!(fitted.parts.iter().any(|p| p.name == "near foot") && fitted != &snapped, "snapping moved some joints");
         state.undo();
         assert!(state.doc.as_ref().unwrap().skeleton.parts.iter().any(|p| p.name == "left forearm"));
+        state.redo();
         state.redo();
 
         // Facing left mirrors it: the toes point left.
