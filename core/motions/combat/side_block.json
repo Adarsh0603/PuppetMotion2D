@@ -1,0 +1,23 @@
+{
+  "name": "Block",
+  "category": "Combat",
+  "order": 3,
+  "template": "Person (side)",
+  "duration": 1.2,
+  "loop": true,
+  "source": "generate.py",
+  "rest": {"torso": -90, "head": -90, "near thigh": 90, "near shin": 90, "near upper arm": 90, "near forearm": 90, "far thigh": 90, "far shin": 90, "far upper arm": 90, "far forearm": 90, "near foot": 0, "far foot": 0},
+  "tracks": {
+    "torso": [[0, 8], [0.6, 10], [1.2, 8]],
+    "near upper arm": [[0, -53], [0.6, -57.0], [1.2, -53.0]],
+    "near forearm": [[0, -120], [0.6, -122], [1.2, -120]],
+    "far upper arm": [[0, -43], [0.6, -47.0], [1.2, -43.0]],
+    "far forearm": [[0, -125], [0.6, -127], [1.2, -125]],
+    "near thigh": [[0, -23], [0.6, -25.0], [1.2, -23.0]],
+    "far thigh": [[0, 7], [0.6, 5.0], [1.2, 7.0]],
+    "near shin": [[0, 20], [0.6, 24], [1.2, 20]],
+    "far shin": [[0, 22], [0.6, 26], [1.2, 22]],
+    "head": [[0, 10], [0.6, 12], [1.2, 10]]
+  },
+  "bob": [[0, 0.0075], [0.6, 0.0092], [1.2, 0.0075]]
+}

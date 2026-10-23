@@ -1,0 +1,24 @@
+{
+  "name": "Falling",
+  "category": "Jump",
+  "order": 4,
+  "template": "Person (side)",
+  "duration": 0.5,
+  "loop": true,
+  "source": "generate.py",
+  "rest": {"torso": -90, "head": -90, "near thigh": 90, "near shin": 90, "near upper arm": 90, "near forearm": 90, "far thigh": 90, "far shin": 90, "far upper arm": 90, "far forearm": 90, "near foot": 0, "far foot": 0},
+  "tracks": {
+    "torso": [[0, 0], [0.25, 0], [0.5, 0]],
+    "near upper arm": [[0, -105], [0.25, -120.0], [0.5, -105.0]],
+    "near forearm": [[0, -30], [0.25, -45], [0.5, -30]],
+    "far upper arm": [[0, -105], [0.25, -120.0], [0.5, -105.0]],
+    "far forearm": [[0, -30], [0.25, -45], [0.5, -30]],
+    "near shin": [[0, 20], [0.25, 20], [0.5, 20]],
+    "far shin": [[0, 20], [0.25, 20], [0.5, 20]],
+    "near foot": [[0, -5], [0.25, -5], [0.5, -5]],
+    "far foot": [[0, -5], [0.25, -5], [0.5, -5]],
+    "near thigh": [[0, -35], [0.25, -30.0], [0.5, -35.0]],
+    "far thigh": [[0, -5], [0.25, -10.0], [0.5, -5.0]],
+    "head": [[0, 5], [0.25, 8], [0.5, 5]]
+  }
+}

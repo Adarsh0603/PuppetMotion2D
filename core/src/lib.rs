@@ -21,7 +21,7 @@ pub mod weight_paint;
 
 pub use any_rig::AnyRig;
 pub use cutout::{Params, auto_params, foreground_mask};
-pub use cycles::{Cycle, CycleKey, builtin_cycles, faces_left};
+pub use cycles::{CATEGORIES, Cycle, CycleKey, builtin_cycles, faces_left};
 pub use geom::RectI;
 pub use history::History;
 pub use mask::Mask;

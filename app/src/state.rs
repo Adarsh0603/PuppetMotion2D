@@ -247,6 +247,22 @@ impl Doc {
     }
 }
 
+/// A ready-made motion: a cycle (by name) or one for any skeleton.
+#[derive(Clone, Debug, PartialEq)]
+pub enum QuickMotion {
+    Cycle(String),
+    Any(AnyRig),
+}
+
+impl QuickMotion {
+    fn name(&self) -> &str {
+        match self {
+            QuickMotion::Cycle(name) => name,
+            QuickMotion::Any(kind) => kind.name(),
+        }
+    }
+}
+
 pub struct AppState {
     pub doc: Option<Doc>,
     /// Which of the four steps is showing. Change it with `set_step`.
@@ -317,8 +333,14 @@ pub struct AppState {
     pub template_choice: usize,
     /// Name typed under "Save as template".
     pub template_name: String,
-    /// Ready-made motions offered in Animate (those that fit the skeleton).
+    /// Ready-made motions offered in Animate (those that fit the skeleton):
+    /// built-in ones, then the user's own, in menu order.
     pub cycles: Vec<Cycle>,
+    /// Name and category typed under "Save as motion".
+    pub motion_name: String,
+    /// The quick motion put on last, offered again beside the Motions menu.
+    pub last_motion: Option<QuickMotion>,
+    pub motion_category: String,
     /// Side-view templates are placed facing left (mirrored) instead of right.
     pub facing_left: bool,
     /// Screen x of the canvas's left edge last frame (the side panel's right
@@ -375,7 +397,10 @@ impl Default for AppState {
             templates: crate::templates::all(),
             template_choice: 0,
             template_name: String::new(),
-            cycles: anim_core::builtin_cycles(),
+            cycles: crate::motions::all(),
+            motion_name: String::new(),
+            last_motion: None,
+            motion_category: crate::motions::USER_CATEGORY.into(),
             facing_left: false,
             canvas_left: 0.0,
             status: "Open or drop a drawing to start.".into(),
@@ -622,19 +647,21 @@ impl AppState {
         let figure_h = doc.figure_box().h as f32;
         let facing_left = anim_core::faces_left(&doc.skeleton);
         let motion = cycle.to_motion(&doc.skeleton, figure_h, doc.motion.fps, facing_left);
-        self.apply_motion(&cycle.name, motion);
+        self.last_motion = Some(QuickMotion::Cycle(cycle.name.clone()));
+        self.apply_motion(&cycle.name, motion, cycle.looping);
     }
 
     /// Put an any-character motion (Breathe, Wiggle, …) on the drawing.
     pub fn apply_any_rig(&mut self, kind: AnyRig) {
         let Some(doc) = &self.doc else { return };
         let motion = kind.motion(&doc.skeleton, doc.figure_box().h as f32, doc.motion.fps);
-        self.apply_motion(kind.name(), motion);
+        self.last_motion = Some(QuickMotion::Any(kind));
+        self.apply_motion(kind.name(), motion, true);
     }
 
     /// Replace the animation with a ready-made `motion` and play it from the
-    /// start (one undo step).
-    fn apply_motion(&mut self, name: &str, motion: Motion) {
+    /// start (one undo step). `looping` sets the timeline's Loop.
+    fn apply_motion(&mut self, name: &str, motion: Motion, looping: bool) {
         let before = self.snapshot();
         let Some(doc) = &mut self.doc else { return };
         doc.motion = motion;
@@ -644,8 +671,33 @@ impl AppState {
         self.playhead = 0.0;
         self.sampled_at = 0.0;
         self.playing = true;
+        self.looping = looping;
         self.status = format!("{name}: change any key on the timeline to make it your own");
         self.commit(before);
+    }
+
+    /// Save the current animation as a motion called `name`, to use on other drawings.
+    pub fn save_motion(&mut self, name: &str, category: &str) {
+        let Some(doc) = &self.doc else { return };
+        let facing_left = anim_core::faces_left(&doc.skeleton);
+        let c = Cycle::from_motion(name, category, &doc.motion, &doc.skeleton, doc.figure_box().h as f32, facing_left, self.looping);
+        self.status = match crate::motions::save(&c) {
+            Ok(_) => {
+                self.cycles = crate::motions::all();
+                self.motion_name.clear();
+                format!("Saved motion {}", c.name)
+            }
+            Err(e) => format!("Could not save the motion: {e}"),
+        };
+    }
+
+    /// Delete one of the user's saved motions.
+    pub fn delete_motion(&mut self, name: &str) {
+        self.status = match crate::motions::delete(name) {
+            Ok(()) => format!("Deleted motion {name}"),
+            Err(e) => format!("Could not delete the motion: {e}"),
+        };
+        self.cycles = crate::motions::all();
     }
 
     /// Key every part at the playhead, as currently posed.
@@ -1332,39 +1384,97 @@ impl AppState {
         self.layers_list(ui);
     }
 
-    /// "Quick motions": one button per ready-made motion that fits the
-    /// skeleton, then the ones that fit any skeleton.
+    /// "Quick motions": one menu with a submenu per category (the motions
+    /// that fit this skeleton, then the ones for any character) and "Save as
+    /// motion". The last one used gets its own button beside the menu.
     fn quick_motions(&mut self, ui: &mut egui::Ui) {
         let Some(doc) = &self.doc else { return };
         if doc.skeleton.parts.is_empty() {
             return;
         }
         let fitting: Vec<Cycle> = self.cycles.iter().filter(|c| c.matches(&doc.skeleton)).cloned().collect();
-        let hint = if doc.motion.is_empty() { "Fills the timeline with this motion" } else { "Replaces the current animation (Ctrl+Z undoes)" };
-        let (mut chosen, mut any) = (None, None);
+        let has_keys = !doc.motion.is_empty();
+        let hint = if has_keys { "Replaces the current animation (Ctrl+Z undoes)" } else { "Fills the timeline with this motion" };
+        let mut pick = None;
+        let mut delete = None;
+        let mut save = None;
         card(ui, "Quick motions", |ui| {
-            if !fitting.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    for c in &fitting {
-                        if ui.button(&c.name).on_hover_text(hint).clicked() {
-                            chosen = Some(c.clone());
-                        }
-                    }
-                });
-                ui.label(egui::RichText::new("Any character").small().weak());
-            }
             ui.horizontal_wrapped(|ui| {
-                for kind in AnyRig::ALL {
-                    if ui.button(kind.name()).on_hover_text(hint).clicked() {
-                        any = Some(kind);
+                ui.menu_button("Motions ▾", |ui| {
+                    for group in fitting.chunk_by(|a, b| a.category == b.category) {
+                        ui.menu_button(&group[0].category, |ui| {
+                            for c in group {
+                                ui.horizontal(|ui| {
+                                    let label = if c.looping { c.name.clone() } else { format!("{} ⏵", c.name) };
+                                    let tip = if c.looping { hint.to_string() } else { format!("Plays once. {hint}") };
+                                    if ui.button(label).on_hover_text(tip).clicked() {
+                                        pick = Some(QuickMotion::Cycle(c.name.clone()));
+                                        ui.close();
+                                    }
+                                    if crate::motions::is_user(c) && ui.small_button("🗑").on_hover_text("Delete this motion").clicked() {
+                                        delete = Some(c.name.clone());
+                                        ui.close();
+                                    }
+                                });
+                            }
+                        });
                     }
+                    ui.menu_button("Any character", |ui| {
+                        for kind in AnyRig::ALL {
+                            if ui.button(kind.name()).on_hover_text(hint).clicked() {
+                                pick = Some(QuickMotion::Any(kind));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    ui.menu_button("Save as motion", |ui| {
+                        ui.label(egui::RichText::new("Keep this animation to put on other characters with the same bones.").weak());
+                        ui.add(egui::TextEdit::singleline(&mut self.motion_name).hint_text("Name").desired_width(160.0));
+                        ui.horizontal_wrapped(|ui| {
+                            for k in std::iter::once(crate::motions::USER_CATEGORY).chain(anim_core::CATEGORIES) {
+                                ui.selectable_value(&mut self.motion_category, k.to_string(), k);
+                            }
+                        });
+                        let name = self.motion_name.trim().to_string();
+                        let taken = crate::motions::is_builtin(&name);
+                        let ok = has_keys && !name.is_empty() && !taken;
+                        let tip = if has_keys { "Save it under this name" } else { "Make some keys on the timeline first" };
+                        if ui.add_enabled(ok, egui::Button::new("Save")).on_disabled_hover_text(tip).clicked() {
+                            save = Some((name, self.motion_category.clone()));
+                            ui.close();
+                        }
+                        if taken {
+                            ui.label(egui::RichText::new("That name belongs to a built-in motion; pick another.").weak());
+                        }
+                    });
+                });
+                // The last motion used, one click away (it may not fit a changed skeleton).
+                let last = self.last_motion.clone().filter(|m| match m {
+                    QuickMotion::Cycle(name) => fitting.iter().any(|c| &c.name == name),
+                    QuickMotion::Any(_) => true,
+                });
+                if let Some(m) = last
+                    && ui.button(format!("{} ↺", m.name())).on_hover_text(hint).clicked()
+                {
+                    pick = Some(m);
                 }
             });
         });
-        if let Some(c) = chosen {
-            self.apply_cycle(&c);
-        } else if let Some(kind) = any {
-            self.apply_any_rig(kind);
+        match pick {
+            Some(QuickMotion::Cycle(name)) => {
+                if let Some(c) = fitting.iter().find(|c| c.name == name) {
+                    self.apply_cycle(c);
+                }
+            }
+            Some(QuickMotion::Any(kind)) => self.apply_any_rig(kind),
+            None => {}
+        }
+        if let Some(name) = delete {
+            self.delete_motion(&name);
+        }
+        if let Some((name, category)) = save {
+            self.save_motion(&name, &category);
         }
     }
 
@@ -2145,7 +2255,8 @@ mod tests {
         state.set_step(Step::Animate);
         let skel = state.doc.as_ref().unwrap().skeleton.clone();
         let fitting: Vec<Cycle> = state.cycles.iter().filter(|c| c.matches(&skel)).cloned().collect();
-        assert!(fitting.iter().any(|c| c.name == "Walk") && !fitting.iter().any(|c| c.name == "Wave"));
+        assert!(fitting.iter().any(|c| c.name == "Walk"));
+        assert!(!fitting.iter().any(|c| c.template == "Person (front)"), "front-view motions don't fit a side rig");
 
         let walk = fitting.iter().find(|c| c.name == "Walk").unwrap().clone();
         state.apply_cycle(&walk);
@@ -2153,6 +2264,17 @@ mod tests {
         assert_eq!(m.duration, walk.duration);
         assert!(m.tracks.contains_key("near thigh") && !m.offset_y.is_empty());
         assert!(state.playing);
+
+        // Save it as my own motion: listed under its category, and can be deleted.
+        let name = format!("Test stroll {}", std::process::id());
+        state.save_motion(&name, "Move");
+        let mine = state.cycles.iter().find(|c| c.name == name).expect("listed").clone();
+        assert!(crate::motions::is_user(&mine) && !crate::motions::is_user(&walk));
+        assert_eq!(mine.category, "Move");
+        assert!(mine.matches(&skel));
+        state.delete_motion(&name);
+        assert!(!state.cycles.iter().any(|c| c.name == name), "{}", state.status);
+
         state.undo();
         assert!(state.doc.as_ref().unwrap().motion.is_empty());
     }

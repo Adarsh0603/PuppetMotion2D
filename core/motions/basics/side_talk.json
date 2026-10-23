@@ -1,0 +1,18 @@
+{
+  "name": "Talk",
+  "category": "Basics",
+  "order": 3,
+  "template": "Person (side)",
+  "duration": 2.0,
+  "loop": true,
+  "source": "generate.py",
+  "rest": {"torso": -90, "head": -90, "near thigh": 90, "near shin": 90, "near upper arm": 90, "near forearm": 90, "far thigh": 90, "far shin": 90, "far upper arm": 90, "far forearm": 90, "near foot": 0, "far foot": 0},
+  "tracks": {
+    "torso": [[0, 2], [0.4, 3], [0.8, 2], [1.2, 4], [1.6, 2], [2.0, 2]],
+    "near upper arm": [[0, -17], [0.4, -33.0], [0.8, -22.0], [1.2, -39.0], [1.6, -17.0], [2.0, -17.0]],
+    "near forearm": [[0, -60], [0.4, -95], [0.8, -70], [1.2, -100], [1.6, -60], [2.0, -60]],
+    "far upper arm": [[0, 3], [0.4, 2.0], [0.8, 3.0], [1.2, 1.0], [1.6, 3.0], [2.0, 3.0]],
+    "far forearm": [[0, -15], [0.4, -15], [0.8, -15], [1.2, -15], [1.6, -15], [2.0, -15]],
+    "head": [[0, 0], [0.4, -6], [0.8, 3], [1.2, -5], [1.6, 2], [2.0, 0]]
+  }
+}
