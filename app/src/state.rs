@@ -3,7 +3,7 @@ use crate::export::ExportUi;
 use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
-    Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
+    AnyRig, Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
     NO_PART, auto_params, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
@@ -615,18 +615,33 @@ impl AppState {
 
     /// Replace the motion with a ready-made one fitted to this character, and play it.
     pub fn apply_cycle(&mut self, cycle: &Cycle) {
-        let before = self.snapshot();
-        let Some(doc) = &mut self.doc else { return };
+        let Some(doc) = &self.doc else { return };
         let figure_h = doc.figure_box().h as f32;
         let facing_left = anim_core::faces_left(&doc.skeleton);
-        doc.motion = cycle.to_motion(&doc.skeleton, figure_h, doc.motion.fps, facing_left);
+        let motion = cycle.to_motion(&doc.skeleton, figure_h, doc.motion.fps, facing_left);
+        self.apply_motion(&cycle.name, motion);
+    }
+
+    /// Put an any-character motion (Breathe, Wiggle, …) on the drawing.
+    pub fn apply_any_rig(&mut self, kind: AnyRig) {
+        let Some(doc) = &self.doc else { return };
+        let motion = kind.motion(&doc.skeleton, doc.figure_box().h as f32, doc.motion.fps);
+        self.apply_motion(kind.name(), motion);
+    }
+
+    /// Replace the animation with a ready-made `motion` and play it from the
+    /// start (one undo step).
+    fn apply_motion(&mut self, name: &str, motion: Motion) {
+        let before = self.snapshot();
+        let Some(doc) = &mut self.doc else { return };
+        doc.motion = motion;
         doc.pose = doc.motion.sample(0.0, &doc.skeleton);
         self.key_sel.clear();
         self.unkeyed_pose = false;
         self.playhead = 0.0;
         self.sampled_at = 0.0;
         self.playing = true;
-        self.status = format!("{}: change any key on the timeline to make it your own", cycle.name);
+        self.status = format!("{name}: change any key on the timeline to make it your own");
         self.commit(before);
     }
 
@@ -1311,32 +1326,39 @@ impl AppState {
         self.layers_list(ui);
     }
 
-    /// "Quick motions": one button per ready-made motion that fits the skeleton.
+    /// "Quick motions": one button per ready-made motion that fits the
+    /// skeleton, then the ones that fit any skeleton.
     fn quick_motions(&mut self, ui: &mut egui::Ui) {
         let Some(doc) = &self.doc else { return };
+        if doc.skeleton.parts.is_empty() {
+            return;
+        }
         let fitting: Vec<Cycle> = self.cycles.iter().filter(|c| c.matches(&doc.skeleton)).cloned().collect();
-        let has_keys = !doc.motion.is_empty();
-        let mut chosen = None;
+        let hint = if doc.motion.is_empty() { "Fills the timeline with this motion" } else { "Replaces the current animation (Ctrl+Z undoes)" };
+        let (mut chosen, mut any) = (None, None);
         card(ui, "Quick motions", |ui| {
-            if fitting.is_empty() {
-                ui.label(
-                    egui::RichText::new("None fit this skeleton. Ready-made motions need a rig from the Person templates.")
-                        .small()
-                        .weak(),
-                );
-                return;
+            if !fitting.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for c in &fitting {
+                        if ui.button(&c.name).on_hover_text(hint).clicked() {
+                            chosen = Some(c.clone());
+                        }
+                    }
+                });
+                ui.label(egui::RichText::new("Any character").small().weak());
             }
             ui.horizontal_wrapped(|ui| {
-                for c in &fitting {
-                    let hint = if has_keys { "Replaces the current animation (Ctrl+Z undoes)" } else { "Fills the timeline with this motion" };
-                    if ui.button(&c.name).on_hover_text(hint).clicked() {
-                        chosen = Some(c.clone());
+                for kind in AnyRig::ALL {
+                    if ui.button(kind.name()).on_hover_text(hint).clicked() {
+                        any = Some(kind);
                     }
                 }
             });
         });
         if let Some(c) = chosen {
             self.apply_cycle(&c);
+        } else if let Some(kind) = any {
+            self.apply_any_rig(kind);
         }
     }
 

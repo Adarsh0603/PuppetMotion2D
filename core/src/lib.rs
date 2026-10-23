@@ -1,5 +1,6 @@
 //! UI-independent core: image ops and cutouts. Must never depend on UI crates.
 
+pub mod any_rig;
 pub mod background;
 pub mod components;
 pub mod cutout;
@@ -18,6 +19,7 @@ pub mod sprites;
 pub mod template;
 pub mod weight_paint;
 
+pub use any_rig::AnyRig;
 pub use cutout::{Params, auto_params, foreground_mask};
 pub use cycles::{Cycle, CycleKey, builtin_cycles, faces_left};
 pub use geom::RectI;
