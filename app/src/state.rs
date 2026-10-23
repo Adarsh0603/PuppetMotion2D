@@ -38,6 +38,9 @@ const DEFAULT_SOFTNESS: f32 = 0.8;
 /// bending meshes made the old "joint fill" slider unnecessary.
 const JOINT_OVERLAP: f32 = 1.0;
 
+/// A small drawing for trying the app without one of your own.
+const SAMPLE: &[u8] = include_bytes!("../assets/sample.png");
+
 /// Undo steps kept per drawing.
 const UNDO_LIMIT: usize = 200;
 
@@ -1220,6 +1223,9 @@ impl AppState {
                     self.request_open_dialog(ui.ctx());
                 }
                 ui.label(egui::RichText::new("Or drop a file on the window. Saved projects (.pm2d) open the same way.").weak());
+                if ui.button("Try a sample drawing").on_hover_text("A simple stick figure, to see every step first").clicked() {
+                    self.open_bytes(ui.ctx(), "sample.png", SAMPLE.to_vec(), None);
+                }
             });
             return;
         };
@@ -1776,6 +1782,15 @@ mod tests {
         state.open(&ctx, &path);
         assert!(state.doc.is_some(), "{}", state.status);
         state
+    }
+
+    #[test]
+    fn sample_drawing_opens_rigged() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::default();
+        state.open_bytes(&ctx, "sample.png", SAMPLE.to_vec(), None);
+        let doc = state.doc.as_ref().expect(&state.status);
+        assert_eq!(parts_in_map(doc), 10, "the template fits and splits the figure");
     }
 
     /// How many parts the part map uses (highest part number + 1).

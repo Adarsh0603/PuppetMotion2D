@@ -1,0 +1,35 @@
+# Builds the Windows app and attaches it to a GitHub Release when a version
+# tag (v0.2.0, …) is pushed. The release notes are written from the commits
+# and can be edited on GitHub afterwards.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release -p puppetmotion
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          exe=target/release/PuppetMotion2D.exe
+          # Upload into a release made by hand for this tag, or make one.
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" "$exe" --clobber
+          else
+            gh release create "$tag" "$exe" --title "$tag" --generate-notes
+          fi
