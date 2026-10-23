@@ -10,7 +10,7 @@ A high-performance 2D character animation engine written in Rust.
 
 🌐 **Web Version:** [PuppetMotion2D Web](https://adarsh0603.github.io/PuppetMotion2D/)
 
-💻 **Windows Desktop:** [v0.1.1 Release](https://github.com/Adarsh0603/PuppetMotion2D/releases/tag/v0.1.1) _(Faster performance for high-resolution images)_
+💻 **Windows Desktop:** [v0.2.0 Release](https://github.com/Adarsh0603/PuppetMotion2D/releases/tag/v0.2.0) _(Faster performance for high-resolution images)_
 
 <!-- Demo GIF goes here once recorded: a drawing going through Review → Rig → Animate → Export.
 ![PuppetMotion 2D: from a drawing to a walk cycle](docs/media/demo.gif)
