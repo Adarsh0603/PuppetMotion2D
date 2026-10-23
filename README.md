@@ -45,7 +45,10 @@ No drawing at hand? The start screen has four samples to try, each rigged in one
 
 ## Download
 
-Get the latest Windows build from the [Releases](https://github.com/Adarsh0603/PuppetMotion2D/releases) page. It's a single `PuppetMotion2D.exe` with nothing to install.
+Get the latest Windows build from the [Releases](https://github.com/Adarsh0603/PuppetMotion2D/releases) page:
+
+- **`PuppetMotion2D-Setup-….exe`**: installs for your user only (no admin rights needed), adds a Start menu shortcut, and opens `.pm2d` projects with a double-click. Uninstall it from Windows Settings like any other app.
+- **`PuppetMotion2D.exe`**: the portable version, a single file with nothing to install.
 
 ## Current Development Status
 
@@ -65,7 +68,7 @@ cd PuppetMotion2D
 cargo run --release -p puppetmotion
 ```
 
-The app is built as `target/release/PuppetMotion2D.exe`.
+The app is built as `target/release/PuppetMotion2D.exe`. To build the installer too, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run `iscc installer\puppetmotion.iss` (the setup lands in `target\installer\`). The Release workflow (run by hand from the Actions tab) builds both on GitHub and attaches them to a draft release.
 
 Run the tests with `cargo test --workspace`.
 

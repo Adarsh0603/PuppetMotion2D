@@ -1,7 +1,7 @@
-# Builds the Windows app and attaches it to a GitHub Release. Runs only by
-# hand: Actions → Release → Run workflow, with the tag to build. A release
-# that doesn't exist yet is made as a draft, so nothing goes public until it's
-# published on GitHub.
+# Builds the Windows app and its installer (installer/puppetmotion.iss) and
+# attaches both to a GitHub Release. Runs only by hand: Actions → Release →
+# Run workflow, with the tag to build. A release that doesn't exist yet is made
+# as a draft, so nothing goes public until it's published on GitHub.
 
 name: Release
 
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build and attach the exe to (for example v0.2.0)"
+        description: "Tag to build and attach the exe and installer to (for example v0.2.0)"
         required: true
 
 permissions:
@@ -26,15 +26,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release -p puppetmotion
+      - name: Build the installer
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          iscc="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          [ -f "$iscc" ] || choco install innosetup -y --no-progress
+          "$iscc" //Q "//DAppVersion=${TAG#v}" installer/puppetmotion.iss
       - name: Upload
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
         run: |
-          exe=target/release/PuppetMotion2D.exe
+          files=(target/release/PuppetMotion2D.exe "target/installer/PuppetMotion2D-Setup-${TAG#v}.exe")
           if gh release view "$TAG" > /dev/null 2>&1; then
-            gh release upload "$TAG" "$exe" --clobber
+            gh release upload "$TAG" "${files[@]}" --clobber
           else
-            gh release create "$TAG" "$exe" --title "$TAG" --generate-notes --draft
+            gh release create "$TAG" "${files[@]}" --title "$TAG" --generate-notes --draft
           fi

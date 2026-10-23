@@ -8,6 +8,7 @@ mod motions;
 mod panel;
 mod paths;
 mod platform;
+mod recent;
 mod state;
 mod templates;
 mod timeline;

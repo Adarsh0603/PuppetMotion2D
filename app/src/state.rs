@@ -349,6 +349,8 @@ pub struct AppState {
     pub highlight_part: Option<usize>,
     /// Skeleton templates: built-in ones, then the user's own.
     pub templates: Vec<Template>,
+    /// Projects opened or saved lately, newest first (the Recent menu).
+    pub recent: Vec<PathBuf>,
     /// The template picked in Rig; new drawings start with it.
     pub template_choice: usize,
     /// Name typed under "Save as template".
@@ -415,6 +417,7 @@ impl Default for AppState {
             brush_strength: 0.1,
             highlight_part: None,
             templates: crate::templates::all(),
+            recent: crate::recent::load(),
             template_choice: 0,
             template_name: String::new(),
             cycles: crate::motions::all(),
@@ -499,6 +502,9 @@ impl AppState {
         doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion, paint: data.weight_paint });
         doc.recompute_skeleton();
         doc.project_path = path.map(Path::to_path_buf);
+        if let Some(path) = path {
+            crate::recent::add(&mut self.recent, path);
+        }
         self.status = format!("Opened project {name}");
         // A project picks up where it was left: animating if it has keys, else rigging.
         let step = if doc.motion.is_empty() { Step::Rig } else { Step::Animate };
@@ -959,6 +965,7 @@ impl AppState {
             Ok(()) => {
                 doc.project_path = Some(path.to_path_buf());
                 doc.dirty = false;
+                crate::recent::add(&mut self.recent, path);
                 // Saved for real, so the crash-recovery copy isn't needed any more.
                 self.unsaved.clear_recovery();
                 format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy())
@@ -1057,7 +1064,11 @@ impl AppState {
     /// Window title: app name, drawing name, and a * when there are unsaved changes.
     pub fn title(&self) -> String {
         match &self.doc {
-            Some(d) => format!("PuppetMotion 2D — {}{}", d.name, if d.dirty { " *" } else { "" }),
+            Some(d) => {
+                // A project goes by its file's name; a drawing not saved yet by the image's.
+                let name = d.project_path.as_deref().and_then(Path::file_stem).map_or(d.name.clone(), |s| s.to_string_lossy().into_owned());
+                format!("PuppetMotion 2D — {name}{}", if d.dirty { " *" } else { "" })
+            }
             None => "PuppetMotion 2D".into(),
         }
     }
@@ -1267,6 +1278,10 @@ impl AppState {
             if ui.button("Open…").on_hover_text("A drawing or a project (Ctrl+O)").clicked() {
                 self.request_open_dialog(ui.ctx());
             }
+            // The browser can't reopen files by path, so it has no Recent menu.
+            if !crate::platform::IS_WEB {
+                self.recent_menu(ui);
+            }
             if crate::platform::IS_WEB {
                 // The browser can't save to a file, only download one.
                 if ui
@@ -1408,6 +1423,42 @@ impl AppState {
         {
             doc.set_fg(&self.params);
             doc.dirty = true;
+        }
+    }
+
+    /// "Recent ▾": the projects opened or saved lately, newest first.
+    fn recent_menu(&mut self, ui: &mut egui::Ui) {
+        let mut open = None;
+        let mut clear = false;
+        ui.menu_button("Recent ▾", |ui| {
+            if self.recent.is_empty() {
+                ui.label(egui::RichText::new("Projects you open or save show up here.").weak());
+                return;
+            }
+            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                for path in &self.recent {
+                    let name = path.file_stem().unwrap_or_default().to_string_lossy();
+                    let folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+                    let exists = path.exists();
+                    let text = egui::RichText::new(if exists { name.to_string() } else { format!("{name} (missing)") });
+                    let item = ui.add_enabled(exists, egui::Button::new(text).right_text(egui::RichText::new(folder).weak().small()));
+                    if item.on_hover_text(path.display().to_string()).on_disabled_hover_text(format!("Not found: {}", path.display())).clicked() {
+                        open = Some(path.clone());
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+            if ui.button("Clear list").clicked() {
+                clear = true;
+                ui.close();
+            }
+        });
+        if let Some(path) = open {
+            self.request_open(ui.ctx(), &path);
+        }
+        if clear {
+            crate::recent::clear(&mut self.recent);
         }
     }
 
@@ -2121,6 +2172,9 @@ mod tests {
         assert_eq!(b.image_bytes, a.image_bytes, "image stored byte for byte");
         assert_eq!(fresh.params.gap_close, 5);
         assert_eq!(fresh.softness, 0.3);
+        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(fresh.title(), format!("PuppetMotion 2D — {stem}"), "a project goes by its file's name");
+        assert!(fresh.recent.first().is_some_and(|p| p.ends_with(path.file_name().unwrap())), "listed under Recent");
         assert_eq!(parts_in_map(b), 10, "parts split again on open");
         assert!(!b.dirty && b.project_path.as_deref() == Some(path.as_path()));
         std::fs::remove_file(&path).unwrap();
