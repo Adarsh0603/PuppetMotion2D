@@ -1,7 +1,9 @@
 # Builds the Windows app and its installer (installer/puppetmotion.iss) and
 # attaches both to a GitHub Release. Runs only by hand: Actions → Release →
-# Run workflow, with the tag to build. A release that doesn't exist yet is made
-# as a draft, so nothing goes public until it's published on GitHub.
+# Run workflow, with a tag. An existing tag is built as it is; a new one is
+# built from the branch the workflow runs on and made when the release is
+# published. A release that doesn't exist yet is made as a draft, so nothing
+# goes public until it's published on GitHub.
 
 name: Release
 
@@ -9,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to build and attach the exe and installer to (for example v0.2.0)"
+        description: "Release tag, new or existing (for example v0.2.0)"
         required: true
 
 permissions:
@@ -20,8 +22,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
+      - name: Use the tag's code if the tag exists
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null; then
+            git fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG"
+            git checkout --quiet "$TAG"
+          else
+            echo "$TAG is a new tag: building $(git rev-parse --short HEAD) from ${GITHUB_REF_NAME}"
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
@@ -44,5 +55,6 @@ jobs:
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" "${files[@]}" --clobber
           else
-            gh release create "$TAG" "${files[@]}" --title "$TAG" --generate-notes --draft
+            # A new tag is made on this commit when the draft is published.
+            gh release create "$TAG" "${files[@]}" --title "$TAG" --generate-notes --draft --target "$(git rev-parse HEAD)"
           fi
