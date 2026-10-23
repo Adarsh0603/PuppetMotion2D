@@ -27,7 +27,7 @@ pub fn dist2(a: [u8; 3], b: [u8; 3]) -> u32 {
 }
 
 /// Per-channel median of a `patch`×`patch` square at (x0, y0), clamped to the image.
-fn patch_median(img: &RgbaImage, x0: u32, y0: u32, patch: u32) -> [u8; 3] {
+pub fn patch_median(img: &RgbaImage, x0: u32, y0: u32, patch: u32) -> [u8; 3] {
     let x1 = (x0 + patch).min(img.width());
     let y1 = (y0 + patch).min(img.height());
     let mut ch: [Vec<u8>; 3] = Default::default();

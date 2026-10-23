@@ -31,7 +31,8 @@ pub struct ProjectData {
     pub skeleton: Skeleton,
     #[serde(default)]
     pub pose: Pose,
-    /// Joint overlap (disc size) used for the cut-out parts.
+    /// Joint overlap (disc size) used for the cut-out parts. No longer read:
+    /// the app always uses 1.0. Still written so older builds open new files.
     #[serde(default = "default_overlap")]
     pub overlap: f32,
     /// Keyed animation (empty in projects saved before motion existed).

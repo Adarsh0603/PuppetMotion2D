@@ -4,7 +4,7 @@ use crate::panel::{card, collapsing, fold, intro, shortcuts};
 use crate::unsaved::{Pending, Unsaved};
 use anim_core::{
     Clip, Cycle, Ease, History, KeyRef, PartMesh, Template, Toward, WeightPaint, apply_paint, build_meshes, cell_size, smooth_weights, Mask, Motion, Params, Pose, ProjectData, RectI, Skeleton, Sprite, build_sprites,
-    NO_PART, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
+    NO_PART, auto_params, distance_transform, foreground_mask, project, project_from_bytes, save_project, masks_from_labels, part_labels,
 };
 use eframe::egui::{self, Color32, ColorImage, TextureHandle, TextureOptions};
 use image::RgbaImage;
@@ -33,6 +33,10 @@ const SMOOTH: TextureOptions = TextureOptions::LINEAR.with_mipmap_mode(Some(egui
 
 /// Joint softness for new drawings: elbows and knees bend smoothly.
 const DEFAULT_SOFTNESS: f32 = 0.8;
+
+/// Joint disc size for the cut-out parts (only shows at softness 0). Fixed:
+/// bending meshes made the old "joint fill" slider unnecessary.
+const JOINT_OVERLAP: f32 = 1.0;
 
 /// Undo steps kept per drawing.
 const UNDO_LIMIT: usize = 200;
@@ -283,8 +287,6 @@ pub struct AppState {
     pub skel_sel: SkelSel,
     /// Rig step: tint each part's pixels in its colour.
     pub show_parts: bool,
-    /// Joint disc radius as a multiple of the child part's thickness (0 = no discs).
-    pub overlap: f32,
     /// How smoothly the drawing bends at the joints: the blend band's half-width
     /// as a multiple of the drawing's thickness there (0 = rigid pieces). Saved.
     pub softness: f32,
@@ -356,7 +358,6 @@ impl Default for AppState {
             clip: None,
             skel_sel: SkelSel::None,
             show_parts: true,
-            overlap: 1.0,
             softness: DEFAULT_SOFTNESS,
             // Off by default until its guesses are more reliable.
             fill_behind: false,
@@ -406,7 +407,7 @@ impl AppState {
     }
 
     fn open_image(&mut self, ctx: &egui::Context, name: &str, bytes: Vec<u8>, ext: String) {
-        let Some(mut doc) = self.load_doc(ctx, name, bytes, ext) else { return };
+        let Some(mut doc) = self.load_doc(ctx, name, bytes, ext, true) else { return };
         // A new drawing bends smoothly by default (an opened project keeps its own setting).
         self.softness = DEFAULT_SOFTNESS;
         // Start with the template last used (Person (front) at first), facing the same way.
@@ -429,10 +430,9 @@ impl AppState {
         let data = loaded.data;
         // Settings first: the figure is found using the project's own cutout settings.
         self.params = data.params;
-        self.overlap = data.overlap;
         self.softness = data.softness;
         self.fill_behind = data.fill_behind;
-        let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext) else { return };
+        let Some(mut doc) = self.load_doc(ctx, &data.image_name, loaded.image_bytes, loaded.image_ext, false) else { return };
         doc.restore(Snapshot { skeleton: data.skeleton, pose: data.pose, motion: data.motion, paint: data.weight_paint });
         doc.recompute_skeleton();
         doc.project_path = path.map(Path::to_path_buf);
@@ -466,7 +466,9 @@ impl AppState {
     }
 
     /// Decode an image and build a fresh document for it (empty skeleton).
-    fn load_doc(&mut self, ctx: &egui::Context, name: &str, bytes: Vec<u8>, ext: String) -> Option<Doc> {
+    /// `auto_cutout` picks the cutout settings for this image; otherwise the
+    /// current ones are used (a project's own).
+    fn load_doc(&mut self, ctx: &egui::Context, name: &str, bytes: Vec<u8>, ext: String, auto_cutout: bool) -> Option<Doc> {
         let image = match image::load_from_memory(&bytes) {
             Ok(img) => img.to_rgba8(),
             Err(e) => {
@@ -484,6 +486,9 @@ impl AppState {
             return None;
         }
         let texture = ctx.load_texture("drawing", to_color_image(&image), SMOOTH);
+        if auto_cutout {
+            self.params = auto_params(&image);
+        }
         let fg = foreground_mask(&image, &self.params);
         let dt = distance_transform(&fg);
         let fg_box = fg.bbox();
@@ -834,7 +839,7 @@ impl AppState {
             params: self.params,
             skeleton: doc.skeleton.clone(),
             pose: doc.pose.clone(),
-            overlap: self.overlap,
+            overlap: JOINT_OVERLAP,
             softness: self.softness,
             fill_behind: self.fill_behind,
             weight_paint: doc.paint.clone(),
@@ -992,7 +997,7 @@ impl AppState {
         self.fix_selection();
     }
 
-    /// Rebuild the cut-out part images if the parts or the overlap changed.
+    /// Rebuild the cut-out part images if the parts changed.
     pub fn refresh_sprites(&mut self, ctx: &egui::Context) {
         let Some(doc) = &mut self.doc else { return };
         if !doc.sprites_dirty {
@@ -1000,7 +1005,7 @@ impl AppState {
         }
         doc.sprites_dirty = false;
         doc.skel_masks = masks_from_labels(&doc.skel_labels, doc.fg.w, doc.fg.h, doc.skeleton.parts.len());
-        doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, self.overlap, self.fill_behind);
+        doc.sprites = build_sprites(&doc.image, &doc.fg, &doc.dt, &doc.skeleton, &doc.skel_masks, JOINT_OVERLAP, self.fill_behind);
         doc.meshes = build_meshes(&doc.sprites, cell_size(doc.figure_box()));
         doc.update_weights(self.softness);
         doc.sprite_tex = doc
@@ -1241,8 +1246,10 @@ impl AppState {
                 egui::Slider::new(&mut self.params.corner_patch, 2..=64).text("corner sample (px)"),
                 "The background colour is read from squares this size in each corner",
             );
-            if ui.button("Reset").clicked() {
-                self.params = Params::default();
+            if ui.button("Auto").on_hover_text("Back to the settings picked for this drawing").clicked()
+                && let Some(doc) = &self.doc
+            {
+                self.params = auto_params(&doc.image);
                 apply = true;
             }
         });
@@ -1302,17 +1309,6 @@ impl AppState {
             }
         });
         self.layers_list(ui);
-        fold(ui, "Fine-tune joints", |ui| {
-            let overlap = self.overlap;
-            ui.add(egui::Slider::new(&mut self.overlap, 0.0..=2.0).text("joint fill"))
-                .on_hover_text("How big a round patch each part keeps at its joints, so turning a part leaves no gap");
-            if overlap != self.overlap
-                && let Some(doc) = &mut self.doc
-            {
-                doc.sprites_dirty = true;
-                doc.dirty = true;
-            }
-        });
     }
 
     /// "Quick motions": one button per ready-made motion that fits the skeleton.
@@ -1839,7 +1835,7 @@ mod tests {
         state.commit(before);
         assert!(state.doc.as_ref().unwrap().dirty, "an edit marks it unsaved");
         state.params.gap_close = 5;
-        state.overlap = 0.6;
+        state.softness = 0.3;
         let path = std::env::temp_dir().join(format!("pm2d_app_test_{}.pm2d", std::process::id()));
         state.save_to(&path);
         assert!(!state.doc.as_ref().unwrap().dirty, "{}", state.status);
@@ -1853,7 +1849,7 @@ mod tests {
         assert_eq!(b.pose, a.pose);
         assert_eq!(b.image_bytes, a.image_bytes, "image stored byte for byte");
         assert_eq!(fresh.params.gap_close, 5);
-        assert_eq!(fresh.overlap, 0.6);
+        assert_eq!(fresh.softness, 0.3);
         assert_eq!(parts_in_map(b), 10, "parts split again on open");
         assert!(!b.dirty && b.project_path.as_deref() == Some(path.as_path()));
         std::fs::remove_file(&path).unwrap();
