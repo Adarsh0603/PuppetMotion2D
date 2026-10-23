@@ -1,4 +1,5 @@
-# PuppetMotion 2D 
+# PuppetMotion 2D
+
 A high-performance 2D character animation engine written in Rust.
 
 **Turn a single drawing into a game-ready animation.** Open a picture of a character, place its bones, animate it on a timeline, and export in multiple formats.
@@ -7,26 +8,26 @@ A high-performance 2D character animation engine written in Rust.
 
 **Watch Full Demo** - [How to Animate a character in PuppetMotion](https://drive.google.com/file/d/1O8VbxdjmwWYcv2nSqimAuaLceeZXnlxI/view?usp=sharing)
 
-🌐 **Web Version:** [PuppetMotion2D Web](https://adarsh0603.github.io/PuppetMotion2D/)  
+🌐 **Web Version:** [PuppetMotion2D Web](https://adarsh0603.github.io/PuppetMotion2D/)
 
-💻 **Windows Desktop:** [v0.1.1 Release](https://github.com/Adarsh0603/PuppetMotion2D/releases/tag/v0.1.1) *(Faster performance for high-resolution images)*
+💻 **Windows Desktop:** [v0.1.1 Release](https://github.com/Adarsh0603/PuppetMotion2D/releases/tag/v0.1.1) _(Faster performance for high-resolution images)_
 
 <!-- Demo GIF goes here once recorded: a drawing going through Review → Rig → Animate → Export.
 ![PuppetMotion 2D: from a drawing to a walk cycle](docs/media/demo.gif)
 -->
-
 
 Free and open source, written in Rust with egui.
 
 ## How it works
 
 <!-- Screenshots go in a first column once recorded: docs/media/review.png, rig.png, animate.png, export.png -->
-| Step | What you do |
-|---|---|
-| **Review** | Open a drawing. The app finds the character and dims the background, so you can check it was cut out cleanly. |
-| **Rig** | A skeleton template (front or side view, facing left or right) fits over the character. Drag the joints into place, and each coloured area moves with its bone. You can also build your own skeleton for monsters and animals. |
-| **Animate** | Pick a ready-made motion, or drag hands and feet to pose; the whole limb follows. Press **K** to keep a pose at a frame, move along the timeline, and pose again. The in-betweens are filled in for you. |
-| **Export** | Preview the result, then save a looping **GIF**, a **sprite sheet** or **PNG frames** for a game engine. |
+
+| Step        | What you do                                                                                                                                                                                                                    |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Review**  | Open a drawing. The app finds the character and dims the background, so you can check it was cut out cleanly.                                                                                                                  |
+| **Rig**     | A skeleton template (front or side view, facing left or right) fits over the character. Drag the joints into place, and each coloured area moves with its bone. You can also build your own skeleton for monsters and animals. |
+| **Animate** | Pick a ready-made motion, or drag hands and feet to pose; the whole limb follows. Press **K** to keep a pose at a frame, move along the timeline, and pose again. The in-betweens are filled in for you.                       |
+| **Export**  | Preview the result, then save a looping **GIF**, a **sprite sheet** or **PNG frames** for a game engine.                                                                                                                       |
 
 No drawing at hand? Press **Try a sample drawing** on the start screen.
 
@@ -42,7 +43,6 @@ No drawing at hand? Press **Try a sample drawing** on the start screen.
 - **Timeline:** keys per bone, Smooth / Linear / Hold easing per key, dragging keys to retime them, frame-rate snapping, copy / cut / paste of keys (even between projects), zoom, and range select.
 - **Export:** GIF, sprite sheet with JSON frame data (Phaser, Godot, Unity), or PNG frames, cropped to the moving character, at any size and frame rate, with a transparent or coloured background.
 
-
 ## Download
 
 Get the latest Windows build from the [Releases](https://github.com/Adarsh0603/PuppetMotion2D/releases) page. It's a single `PuppetMotion2D.exe` with nothing to install.
@@ -50,6 +50,7 @@ Get the latest Windows build from the [Releases](https://github.com/Adarsh0603/P
 ## Current Development Status
 
 This is an early version that's being actively developed. Currently in development:
+
 - **Auto Rigging and Controlled Animation using AI models:** one click rig generation using AI, Auto generate keyframes for different animation cycles with AI (Walk, Run, Attack etc..) and fine tune them manually.
 - **Layered characters:** import each part as its own image (or a PSD) for clean side-view walk cycles.
 - A bigger **motion library** to reuse walks on any character, and **MP4** export.
@@ -64,18 +65,17 @@ cd PuppetMotion2D
 cargo run --release -p puppetmotion
 ```
 
-The app is built as `target/release/PuppetMotion2D.exe`. Pushing a `v*` tag builds it on GitHub and attaches it to that tag's release.
+The app is built as `target/release/PuppetMotion2D.exe`.
 
 Run the tests with `cargo test --workspace`.
 
 The code is split into three crates:
 
-| Crate | What it does |
-|---|---|
-| `core/` | All the logic, with no UI: cutout, skeleton, part split, posing and IK, animation, project files |
-| `app/` | The editor window (egui) |
-| `export/` | Renders frames on the CPU and writes GIF, sprite sheets and PNG |
-
+| Crate     | What it does                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------ |
+| `core/`   | All the logic, with no UI: cutout, skeleton, part split, posing and IK, animation, project files |
+| `app/`    | The editor window (egui)                                                                         |
+| `export/` | Renders frames on the CPU and writes GIF, sprite sheets and PNG                                  |
 
 Ideas and bug reports are welcome in [Issues](https://github.com/Adarsh0603/PuppetMotion2D/issues).
 
